@@ -37,8 +37,9 @@ dice_wafer.py, which the safety code is adapted from):
     power or frequency; it only reads and verifies them.
   * A countdown precedes the run; pressing a key during the countdown, between arrays,
     during a mask pause, or DURING a mark does a controlled stop (stage `I` + WinLase
-    TerminateMark -- the abort poll halts the in-progress multi-pass mark). Keep a hand
-    on the hardware e-stop anyway. This live-laser path could not be tested off the machine.
+    TerminateMark -- the abort poll halts the in-progress mark). Each array is marked in a
+    SINGLE WinLase op (all its passes, alternating the crosshatch angles), so keep a hand on
+    the hardware e-stop anyway. This live-laser path could not be tested off the machine.
 
 STOP is a CONTROLLED stop (between arrays / at a mask pause), never an e-stop. A --stop-flag
 file (written by the UI's STOP button) is polled the same way as a keypress.
@@ -67,7 +68,7 @@ import transform                    # wafer->stage math + reachability (sec 6)
 import winlase_build_jobs           # job naming / bounds helpers (sec 7.2)
 import etch_params                  # editable per-type etch table (passes), same dir
 
-DEFAULT_PASSES = 1                   # fallback pass count per array unless plan/etch/CSV says otherwise
+DEFAULT_PASSES = 1                   # fallback pass count per array; set on the WinLase object, marked once
 DEFAULT_PASSES_FILE = Path(__file__).resolve().parent / "expose_passes.csv"
 DEFAULT_CALIBRATION = Path(__file__).resolve().parent / "exposure_calibration.json"
 DEFAULT_COUNTDOWN_S = 10
@@ -97,7 +98,10 @@ PROFILE_SPEED_IDX, PROFILE_POWER_IDX, PROFILE_FREQ_IDX = 0, 5, 9
 # loads -- otherwise closing/loading mid-mark wedges WinLase "busy").
 MARK_POLL_S = 0.02           # GetBusyStatus poll interval
 MARK_SETTLE_S = 0.1          # let a just-issued mark register as busy before we poll for done
-MARK_WAIT_TIMEOUT_S = 120.0  # max idle wait PER PASS (a whole n-pass mark waits this x n)
+MARK_WAIT_TIMEOUT_S = 900.0  # default max wait per mark pass to go idle (--mark-timeout overrides).
+                             # A dense crosshatch pass (e.g. dead-space at 0.01 mm hatch) is minutes
+                             # long; this is only a HANG backstop -- the abort poll lets the operator
+                             # STOP at any moment during the wait, so it can be generous.
 
 # Time-estimate (ETA): empirical, measured live. Emitted as "[eta] ..." lines that the
 # launcher UI mirrors into its Est. time field. A small per-set cache warm-starts it.
@@ -132,7 +136,8 @@ class WinLaseMarker:
     are the tested safety core and are intentionally unchanged.
     """
 
-    def __init__(self):
+    def __init__(self, mark_timeout=MARK_WAIT_TIMEOUT_S):
+        self.mark_timeout = float(mark_timeout)
         try:
             from win32com.client import dynamic
         except ImportError as exc:
@@ -217,12 +222,14 @@ class WinLaseMarker:
     def mark_job(self, wlj: Path, passes: int, abort, on_pass=None) -> bool:
         """Load a job, set its per-array pass count on every object, and mark it ONCE.
 
-        WinLase runs all `passes` passes inside that single mark, alternating the two
-        crosshatch fill angles -- a single external mark only lays the FIRST angle, so the
-        pass count has to live on the object, not in an outer loop. Setting it here (from
-        the plan) also means editing plan.json passes takes effect without rebuilding jobs.
-        Returns False if aborted; `on_pass(0, dt)`, if given, reports the mark's wall-clock
-        seconds for the live estimate (best-effort -- an exception in it is swallowed)."""
+        A crosshatch fill lays its two angles across the OBJECT's passes, so the pass
+        count must live on the object -- an external mark-loop with NumPasses=1 only ever
+        lays the first angle (0 deg). We set the count from the plan (so editing plan.json
+        passes needs no job rebuild) and mark once; WinLase runs all `passes` internally.
+
+        For the live estimate, `on_pass(i, dt)` is REPLAYED once per pass with the measured
+        average per-pass time after the mark finishes (WinLase runs the passes in one op, so
+        there is no per-pass callback during it). Returns False if aborted."""
         n = max(1, int(passes))
         job_index = int(self.m.LoadJobFromFile(str(wlj.resolve())))
         self.m.SetActiveJob(job_index)
@@ -237,30 +244,32 @@ class WinLaseMarker:
             raise RuntimeError("laser profile check failed at mark time:\n  "
                                + "\n  ".join(problems))
         try:
-            # Set the real pass count on every object so WinLase cross-hatches internally
-            # (all passes in one mark), rather than an outer loop that only lays one angle.
+            # Put the real pass count on every object so WinLase cross-hatches internally
+            # (all passes in one mark), instead of an outer loop that only lays one angle.
             for obj in range(int(self.m.GetObjCount())):
                 self.m.SetObjNumPasses(obj, n)
-            # Make sure the marker is idle before we start -- this also drains the tail of
-            # the previous array's job so loading/closing never collides with a mark.
-            if not self._wait_not_busy(abort, MARK_WAIT_TIMEOUT_S):
+            # Idle before starting -- drains the previous array's tail so load/close never
+            # collides with a mark.
+            if not self._wait_not_busy(abort, self.mark_timeout):
                 self.m.TerminateMark()
                 return False
             if abort():
                 self.m.TerminateMark()
                 return False
-            t_pass = time.time()
-            self.m.MarkAllObj(0)          # async: WinLase runs ALL n passes, returns immediately
+            t0 = time.time()
+            self.m.MarkAllObj(0)          # async: WinLase runs ALL n passes (alternating angles)
             time.sleep(MARK_SETTLE_S)     # let the mark register as busy before polling
-            # The whole n-pass mark must fit the timeout, so scale it by the pass count.
-            if not self._wait_not_busy(abort, MARK_WAIT_TIMEOUT_S * n):
+            # The whole n-pass mark must fit the wait, so scale the per-pass budget by n.
+            if not self._wait_not_busy(abort, self.mark_timeout * n):
                 self.m.TerminateMark()
                 return False
             if on_pass is not None:
-                try:
-                    on_pass(0, time.time() - t_pass)
-                except Exception:
-                    pass                  # ETA is cosmetic; never let it break a mark
+                per = (time.time() - t0) / n
+                for i in range(n):
+                    try:
+                        on_pass(i, per)       # replay per-pass timing to keep the ETA accurate
+                    except Exception:
+                        pass                  # ETA is cosmetic; never let it break a mark
         finally:
             try:
                 self.m.CloseJob(job_index)    # safe now: the job has fully finished marking
@@ -708,6 +717,10 @@ def main() -> int:
     p.add_argument("--etch-params", type=Path, default=None,
                    help="etch table JSON; per-type passes override the plan (unless --passes given). "
                         "Default: etch_params.json next to this script if it exists.")
+    p.add_argument("--mark-timeout", type=float, default=MARK_WAIT_TIMEOUT_S,
+                   help="hang backstop: max seconds PER PASS to wait for a mark to finish (the whole "
+                        "n-pass mark waits this x n). Raise for very dense/large fills. Default: %(default)s. "
+                        "The operator can STOP at any time during the wait regardless.")
     p.add_argument("--arm", action="store_true", help="ACTUALLY fire the laser (default: simulate)")
     p.add_argument("--focus", action="store_true",
                    help="set Z from the calibration reference before each mark (needs motor)")
@@ -842,7 +855,7 @@ def main() -> int:
         if not args.yes and input('type "EXPOSE" to arm: ').strip() != "EXPOSE":
             print("not armed; exiting.")
             return 1
-        marker = WinLaseMarker()
+        marker = WinLaseMarker(mark_timeout=args.mark_timeout)
         if not marker.ready():
             marker.close()
             raise SystemExit("WinLase busy at start; aborting.")
@@ -887,9 +900,7 @@ def main() -> int:
     eta = None
     try:
         warm = load_eta_cache(DEFAULT_ETA_CACHE, set_name)
-        # Each array is now ONE mark op (WinLase runs all its passes internally), so the
-        # estimator tracks one measured mark per array rather than per external pass.
-        eta = EtaTracker(labels, {l: 1 for l in labels},
+        eta = EtaTracker(labels, {l: passes_by_label[l] for l in labels},
                          warm=warm, final_move=False)
         if warm:
             eta.preview()

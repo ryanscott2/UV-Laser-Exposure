@@ -73,14 +73,15 @@ import etch_params  # editable per-type etch table (passes + crosshatch angles),
 # --- Settings (from the exposure operating procedure) ----------------------------
 FILL_SPACING_MM = 0.01             # default hatch / pass width (0.01 mm); per-array override from plan
 FILL_STYLE_PARALLEL = 0            # SetObjFill style: 0 = parallel lines (single angle)
-FILL_STYLE_CROSSHATCH = 2          # SetObjFill style: crosshatch (two-angle fill).
-                                   # Confirmed correct on the machine (2026-08-18).
+FILL_STYLE_CROSSHATCH = 1          # SetObjFill style: crosshatch (two-angle fill, slope1 + slope2
+                                   # in one mark). CORRECTED on the machine (2026-08-18): value 2 is
+                                   # "bidirectional" (single angle, back-and-forth) -- crosshatch is 1.
 DEFAULT_FILL_ANGLES_DEG = (0.0, 90.0)
 FILL_ANGLE_DEG = 0                 # fallback single angle if a plan array carries no etch params
-NUM_PASSES = 1                     # fallback if a job carries no pass count. Normally each job's
-                                   # per-array etch PASSES are set ON THE OBJECT so WinLase runs them
-                                   # all in ONE mark (alternating the crosshatch angles). A single
-                                   # mark only lays the first angle, so passes must NOT be an outer loop.
+NUM_PASSES = 1                     # fallback if a job carries no pass count. The per-array etch PASSES
+                                   # are set ON THE OBJECT (SetObjNumPasses) so WinLase runs them all in
+                                   # ONE mark, alternating the two crosshatch angles (slope1 then
+                                   # slope2 ...). An external mark-loop only lays the first angle.
 MARK_SPEED_MM_S = 400.0            # written onto Profile 0 (WinLase default profile is 1000 mm/s);
 SPEED_TOLERANCE_MM_S = 10.0        # ONLY the speed is written -- power/frequency are verified unchanged
 
@@ -287,11 +288,10 @@ class WinLaseSession(object):
             self.m.SetObjFill(obj, spacing_bits, a1, a1, FILL_STYLE_PARALLEL)
         self.m.SetObjMarkFillFlag(obj, 1)
         self.m.SetObjMarkOutlineFlag(obj, 0)
-        # Bake the per-array pass count onto the object so WinLase runs all passes in one
-        # mark (alternating the crosshatch angles). expose_wafer also sets this from the
-        # plan at run time, so editing plan.json passes takes effect without a rebuild.
-        obj_passes = int(job.get("passes") or NUM_PASSES)
-        self.m.SetObjNumPasses(obj, obj_passes)
+        # Bake the per-array pass count so WinLase runs all passes in one mark, alternating
+        # the crosshatch angles (>=2 reaches the second angle). expose_wafer also sets this
+        # from the plan at run time, so editing plan.json passes needs no rebuild.
+        self.m.SetObjNumPasses(obj, int(job.get("passes") or NUM_PASSES))
         # Force the mark speed to 400 mm/s (the WinLase default profile is 1000).
         # Write ONLY the speed: read Profile 0, change just the speed field, write
         # it back (laser power, frequency, and delays are echoed unchanged), then
