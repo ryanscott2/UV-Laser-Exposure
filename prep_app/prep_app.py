@@ -115,6 +115,21 @@ def _dated_name(stem: str) -> str:
     return f"{_today_mmddyy()}_{stem}"
 
 
+def _find_manifest(gds_path: Path):
+    """The design manifest (per-array etch params: passes + crosshatch angles)
+    that goes with a GDS, by build_wafer's naming convention. Prefer the exact
+    ``<stem>_manifest.csv`` next to the GDS; otherwise, if the folder holds exactly
+    one ``*_manifest.csv``, use it. Returns a Path, or None if absent/ambiguous.
+
+    Without this, every array falls back to the default 0/90 crosshatch (hex must
+    be -30/+30) and carries no per-array pass count -- so the caller warns loudly."""
+    exact = gds_path.with_name(gds_path.stem + "_manifest.csv")
+    if exact.is_file():
+        return exact
+    candidates = sorted(gds_path.parent.glob("*_manifest.csv"))
+    return candidates[0] if len(candidates) == 1 else None
+
+
 # --------------------------------------------------------------------- models
 
 
@@ -1051,26 +1066,44 @@ class Bridge(QObject):
         set_name = str(params.get("output", "")).strip() or _dated_name(path.stem)
         global_x = float(params.get("globalX", 0.0) or 0.0)
         global_y = float(params.get("globalY", 0.0) or 0.0)
+        rotation = str(params.get("rotation", "auto")).strip().lower() or "auto"
+        manifest = _find_manifest(path)   # per-array etch params (passes + fill angles)
 
-        # Match pflm.cli §5.6 exactly -- no invented flags.
+        # Match pflm.cli build flags exactly -- no invented flags.
+        # --circles: these are round-pin arrays; CIRCLE export is exact and fast,
+        # where polygonizing 512-gon x ~10k pins x 14 arrays is minutes-slow.
         arguments = [
             "-m", "pflm.cli", "build", str(path),
             "--pinfin", pinfin,
             "--bbox", bbox,
             "--align", align,
             "--set", set_name,
+            "--rotation", rotation,
+            "--circles",
             "--global-x", f"{global_x:g}",
             "--global-y", f"{global_y:g}",
         ]
+        if manifest is not None:
+            arguments += ["--params", str(manifest)]
         if not bool(params.get("backside", True)):
             arguments.append("--no-backside")
 
         self.logCleared.emit()
         self.logAppended.emit("> python " + " ".join(arguments) + "\n\n")
-        if str(params.get("rotation", "auto")).lower() != "auto":
+        if manifest is not None:
+            self.logAppended.emit(f"[etch] per-array params from {manifest.name} "
+                                  "(square 0/90, hex -30/+30).\n")
+            if rotation not in ("auto", "0"):
+                self.logAppended.emit(
+                    f"[etch] WARNING: the manifest is written in the rotation-0 frame; at "
+                    f"rotation {rotation} the per-array join may miss and arrays fall back "
+                    "to the default 0/90 fill. Use rotation 0 (or auto) for a pre-baked design.\n")
+            self.logAppended.emit("\n")
+        else:
             self.logAppended.emit(
-                "[note] the rotation control drives the preview; the CLI build "
-                "chooses rotation automatically (pflm.cli has no rotation flag).\n\n")
+                "[etch] WARNING: no design manifest (<name>_manifest.csv) beside the GDS -- "
+                "every array will use the DEFAULT 0/90 crosshatch and NO per-array pass "
+                "counts. Put the manifest next to the GDS and rebuild to fix.\n\n")
         self._set_busy(True)
         self._set_status("Building set...")
 

@@ -29,9 +29,13 @@ from .layers import layer_indices_for_spec, parse_layer_spec
 DEFAULT_STAGE_REF_UM = (5590.0, -18450.0)  # stage target for wafer (0, 0)
 DEFAULT_AXES = (-1, 1)                      # (sx, sy): stage_X = 5590 - wx, stage_Y = -18450 + wy
 
-# Candidate rotations, ordered so ties resolve to the smallest positive degree
-# (90 before 180/270, with 0 considered last).
-_ROTATION_CANDIDATES = (90, 180, 270, 0)
+# Candidate rotations, ordered so ties resolve to the SMALLEST rotation: 0 first
+# (no needless flip), then 90 before 270. A design that must rotate to fit still
+# scores 90/270 above 0/180 on `long_on_x`, so this order only decides 0-vs-180 and
+# 90-vs-270 ties -- and there the smaller rotation wins. Keeping a pre-baked design
+# at 0 matters: a per-array etch manifest is written in the rotation-0 frame, so an
+# auto flip to 180 would move every array and the manifest join would silently miss.
+_ROTATION_CANDIDATES = (0, 90, 180, 270)
 
 
 @dataclass(frozen=True)
@@ -340,7 +344,8 @@ def choose_rotation(boxes, *, travel_um=(126000, 76000), stage_y_max_um=6950) ->
 
     Prefer a stage-feasible rotation that puts the longer array-extent on stage-X
     (so the short extent rides the ceiling-limited stage-Y). Deterministic; ties
-    resolve to the smallest positive degree (candidate order 90, 180, 270, 0).
+    resolve to the smallest rotation (candidate order 0, 90, 180, 270), so a design
+    already at the right orientation stays at 0.
     Returns a ``rotation_feasibility`` dict for the chosen degree.
     """
     best = None
