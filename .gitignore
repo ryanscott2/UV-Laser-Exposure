@@ -30,6 +30,8 @@ laser_pc/optiscan_positions.json
 # operator-tuned etch table; defaults live in etch_params.py
 laser_pc/etch_params.json
 laser_pc/expose_passes.csv
+# optional absolute path to a shared/reused venv's pythonw.exe (read by run_ui.bat)
+laser_pc/venv_path.txt
 
 # --- OS / editor ---
 .DS_Store
