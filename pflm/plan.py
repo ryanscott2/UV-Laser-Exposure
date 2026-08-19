@@ -54,8 +54,8 @@ from .dxf_writer import write_circles_r2010, write_dxf_r2010, write_rects_r2010
 # Dead-space ablation recipe (etched FIRST, per chip, to make the chips mate cleanly).
 # Removes the cell footprint minus the pin-field box; nothing inside the pin box is
 # touched. Faster + shallower than the pin etch; operator-tunable numbers.
-DEAD_SPACE_ETCH = {"passes": 10, "speed_mm_s": 1000.0, "fill_style": "bidirectional",
-                   "fill_angles_deg": [90], "hatch_mm": 0.02}
+DEAD_SPACE_ETCH = {"passes": 20, "speed_mm_s": 1000.0, "fill_style": "bidirectional",
+                   "fill_angles_deg": [90], "hatch_mm": 0.05}
 from .layers import layer_indices_for_spec, parse_layer_spec, read_layout
 
 # Machine constants (§2, §2.1).
