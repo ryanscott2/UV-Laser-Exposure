@@ -72,10 +72,14 @@ import etch_params  # editable per-type etch table (passes + crosshatch angles),
 
 # --- Settings (from the exposure operating procedure) ----------------------------
 FILL_SPACING_MM = 0.01             # default hatch / pass width (0.01 mm); per-array override from plan
-FILL_STYLE_PARALLEL = 0            # SetObjFill style: 0 = parallel lines (single angle)
+FILL_STYLE_PARALLEL = 0            # SetObjFill style: 0 = parallel lines, single angle, jump back each line
 FILL_STYLE_CROSSHATCH = 1          # SetObjFill style: crosshatch (two-angle fill, slope1 + slope2
                                    # in one mark). CORRECTED on the machine (2026-08-18): value 2 is
                                    # "bidirectional" (single angle, back-and-forth) -- crosshatch is 1.
+FILL_STYLE_BIDIRECTIONAL = 2       # single-angle raster, laser on both directions (NO jump-back) --
+                                   # ~3x faster than crosshatch; used for bulk dead-space removal.
+FILL_STYLE_BY_NAME = {"parallel": FILL_STYLE_PARALLEL, "crosshatch": FILL_STYLE_CROSSHATCH,
+                      "bidirectional": FILL_STYLE_BIDIRECTIONAL}
 DEFAULT_FILL_ANGLES_DEG = (0.0, 90.0)
 FILL_ANGLE_DEG = 0                 # fallback single angle if a plan array carries no etch params
 NUM_PASSES = 1                     # fallback if a job carries no pass count. The per-array etch PASSES
@@ -189,6 +193,7 @@ def discover_jobs(set_dir):
                 "has_geometry": bool(array.get("has_geometry", True)),
                 "polygon_count": array.get("polygon_count"),
                 "passes": etch.get("passes"),                 # applied at RUN time (expose_wafer)
+                "fill_style": etch.get("fill_style"),          # crosshatch | bidirectional | parallel
                 "fill_angles_deg": etch.get("fill_angles_deg"),
                 "hatch_mm": etch.get("hatch_mm"),
                 "speed_mm_s": etch.get("speed_mm_s"),
@@ -278,14 +283,19 @@ class WinLaseSession(object):
             warnings.append(
                 "%s: %.4f mm rounds below 1 bit at %d bits/mm; fill spacing set to 1 bit"
                 % (job["array_id"], hatch_mm, self.bits_per_mm))
-        # Per-array crosshatch: two fill angles from the plan (square 0/90, hex -30/+30).
+        # Per-array fill. Pinfins/marks: crosshatch (two angles, square 0/90, hex -30/+30).
+        # Dead-space: bidirectional single-angle raster (no jump-back). Style is taken from the
+        # plan's etch.fill_style when present, else inferred from the angle count.
         angles = job.get("fill_angles_deg") or list(DEFAULT_FILL_ANGLES_DEG)
         a1 = float(angles[0])
         a2 = float(angles[1]) if len(angles) > 1 else a1
-        if abs(a2 - a1) > 1e-6:
+        style = FILL_STYLE_BY_NAME.get(str(job.get("fill_style") or "").strip().lower())
+        if style is None:
+            style = FILL_STYLE_CROSSHATCH if abs(a2 - a1) > 1e-6 else FILL_STYLE_PARALLEL
+        if style == FILL_STYLE_CROSSHATCH:
             self.m.SetObjFill(obj, spacing_bits, a1, a2, FILL_STYLE_CROSSHATCH)
         else:
-            self.m.SetObjFill(obj, spacing_bits, a1, a1, FILL_STYLE_PARALLEL)
+            self.m.SetObjFill(obj, spacing_bits, a1, a1, style)   # single-angle raster
         self.m.SetObjMarkFillFlag(obj, 1)
         self.m.SetObjMarkOutlineFlag(obj, 0)
         # Bake the per-array pass count so WinLase runs all passes in one mark, alternating
@@ -372,10 +382,11 @@ def print_plan(set_dir, jobs, out_dir):
         cx, cy = (xmin + xmax) / 2.0, (ymin + ymax) / 2.0
         angles = job.get("fill_angles_deg") or list(DEFAULT_FILL_ANGLES_DEG)
         ang = "/".join("%g" % a for a in angles)
+        style = job.get("fill_style") or ("crosshatch" if len(angles) > 1 else "parallel")
         passes = job.get("passes")
-        print("     crosshatch %s deg @ %s mm | %s passes @ %s mm/s | bbox "
+        print("     %s %s deg @ %s mm | %s passes @ %s mm/s | bbox "
               "[%.3f,%.3f]..[%.3f,%.3f] mm, center (%+.3f,%+.3f) mm"
-              % (ang, job.get("hatch_mm") or FILL_SPACING_MM,
+              % (style, ang, job.get("hatch_mm") or FILL_SPACING_MM,
                  passes if passes is not None else "?",
                  job.get("speed_mm_s") or MARK_SPEED_MM_S,
                  xmin, ymin, xmax, ymax, cx, cy))

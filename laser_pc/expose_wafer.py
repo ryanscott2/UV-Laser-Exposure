@@ -806,6 +806,7 @@ def main() -> int:
             "angles": (tp or {}).get("fill_angles_deg") or pe.get("fill_angles_deg"),
             "speed": (tp or {}).get("speed_mm_s") or pe.get("speed_mm_s"),
             "hatch": (etch_table.get("hatch_mm") if tp else None) or pe.get("hatch_mm"),
+            "style": (tp or {}).get("fill_style") or pe.get("fill_style") or "crosshatch",
         }
 
     print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, args.focus, args.arm,
@@ -836,8 +837,9 @@ def main() -> int:
         ang = "/".join(str(a) for a in (e["angles"] or [])) or "?"
         passes = e["passes"] if e["passes"] is not None else "?"
         grand += (e["passes"] or 0) * cnt
-        print("  %-10s x%-2d : %s passes/array, crosshatch %s deg, %s mm/s, hatch %s mm"
-              % (typ, cnt, passes, ang, e["speed"] if e["speed"] is not None else "?",
+        print("  %-10s x%-2d : %s passes/array, %s %s deg, %s mm/s, hatch %s mm"
+              % (typ, cnt, passes, e.get("style") or "crosshatch", ang,
+                 e["speed"] if e["speed"] is not None else "?",
                  e["hatch"] if e["hatch"] is not None else "?"))
     print("  total: %d array marks, %d laser passes overall" % (len(targets), grand))
 
