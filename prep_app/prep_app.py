@@ -86,6 +86,7 @@ STAGE_Y_MAX_UM = 6950         # the P3/P4 ceiling
 PHASE_COLORS = {0: "#4cc2ff", 1: "#ffb951"}   # A = blue, B = orange
 PHASE_LABEL = {0: "A", 1: "B"}
 NO_GEOM_COLOR = "#ff99a4"
+ALIGN_COLOR = "#c58cff"       # violet -- alignment marks (final phase)
 SELECT_COLOR = "#ffffff"
 FIELD_COLOR = "#6ccb5f"
 GUIDE_COLOR = "#7a7a7a"
@@ -198,6 +199,11 @@ class ArrayView:
     polygon_count: int
     has_geometry: bool
     fits_field: bool
+    # Alignment-mark extras (pinfin arrays keep these defaults).
+    is_align: bool = False
+    align_index: int = 0
+    field_offset_mm: tuple = (0.0, 0.0)
+    passes: int | None = None
 
 
 @dataclass
@@ -217,6 +223,8 @@ class PflmPreview:
     stage_y_max_um: float
     within_row_stride: int
     n_masks: int
+    n_align_marks: int = 0
+    align_tol_mm: float = 25.0
     notes: list = field(default_factory=list)
 
 
@@ -237,7 +245,8 @@ def _load_layout(path: Path):
 def build_pflm_preview(*, input_path, pinfin_spec, bbox_spec, align_spec,
                        rotation, within_row_stride,
                        travel_um=TRAVEL_UM, stage_y_max_um=STAGE_Y_MAX_UM,
-                       usable_half_um=USABLE_HALF_UM, row_tol_um=None) -> PflmPreview:
+                       usable_half_um=USABLE_HALF_UM, row_tol_um=None,
+                       align_tol_um=None) -> PflmPreview:
     """Build the preview by calling the pflm engine directly: detect arrays,
     group into rows top->bottom, choose/apply the design rotation, and expand
     the mask schedule. Returns a draw-ready, klayout-free structure."""
@@ -340,6 +349,67 @@ def build_pflm_preview(*, input_path, pinfin_spec, bbox_spec, align_spec,
         notes.append(f"{len(bad_fit)} array(s) exceed the ±{half_um/1000:g} mm "
                      f"usable field ({', '.join(bad_fit[:6])}).")
 
+    # ---- FINAL PHASE: alignment marks (mirror pflm.plan.build_set) ------------
+    # Etched last, after a wash/mask pause. Each mark centers on the closest
+    # reachable point (clamp to the stage envelope) and lands off-center in the
+    # field by `off`, exposed at its true wafer location. Appended to the schedule
+    # + arrays so the preview's step list matches the built plan.json step-for-step.
+    tol_um = float(align_tol_um) if align_tol_um is not None else float(pflm_arrays.ALIGN_TOL_UM)
+    n_align = 0
+    if align_spec:
+        try:
+            marks = list(pflm_arrays.detect_align_marks(layout, align_spec))
+        except Exception as exc:  # noqa: BLE001 - surfaced as a preview note
+            marks = []
+            notes.append(f"Alignment layer '{align_spec}' not read: {exc}")
+        align_row_index = len(rows)
+        if marks and any(s.get("action") == "expose" for s in schedule):
+            schedule.append({"step": len(schedule), "action": "mask",
+                             "label": "pinfins complete -- wash + mask, then etch alignment marks"})
+        unreachable: list[str] = []
+        for mi, mb in enumerate(marks):
+            exposed_mark = pflm_arrays.rotate_point_um(mb.center_um, deg)
+            eff, off = pflm_arrays.clamp_center(exposed_mark, travel_um=tuple(travel_um),
+                                                stage_y_max_um=stage_y_max_um)
+            l, b, r, t = mb.bbox_um
+            corners_um = [pflm_arrays.rotate_point_um((l, b), deg),
+                          pflm_arrays.rotate_point_um((r, b), deg),
+                          pflm_arrays.rotate_point_um((r, t), deg),
+                          pflm_arrays.rotate_point_um((l, t), deg)]
+            xs = [x for x, _ in corners_um]
+            ys = [y for _, y in corners_um]
+            within = max(abs(off[0]), abs(off[1])) <= tol_um
+            expose_seen += 1
+            aid = "align%02d" % mi
+            arrays.append(ArrayView(
+                array_id=aid, row_index=align_row_index, col_index=mi,
+                step=expose_seen, phase=0,
+                exposed_corners_mm=[(x / 1000.0, y / 1000.0) for x, y in corners_um],
+                exposed_center_mm=(exposed_mark[0] / 1000.0, exposed_mark[1] / 1000.0),
+                exposed_center_um=(exposed_mark[0], exposed_mark[1]),
+                bbox_center_um=(mb.center_um[0], mb.center_um[1]),
+                exposed_w_mm=(max(xs) - min(xs)) / 1000.0,
+                exposed_h_mm=(max(ys) - min(ys)) / 1000.0,
+                polygon_count=0, has_geometry=True, fits_field=within,
+                is_align=True, align_index=mi,
+                field_offset_mm=(off[0] / 1000.0, off[1] / 1000.0),
+                passes=int(pflm_plan.ALIGN_ETCH["passes"]),
+            ))
+            schedule.append({"step": len(schedule), "action": "expose", "array_id": aid,
+                             "row_index": align_row_index, "phase": 0,
+                             "passes": int(pflm_plan.ALIGN_ETCH["passes"])})
+            n_align += 1
+            if not within:
+                unreachable.append(aid)
+        if marks:
+            notes.append(f"Alignment marks: {n_align} mark(s), "
+                         f"{pflm_plan.ALIGN_ETCH['passes']} passes, etched last "
+                         f"(within ±{tol_um/1000:g} mm of field center).")
+        if unreachable:
+            notes.append(f"{len(unreachable)} alignment mark(s) land > ±{tol_um/1000:g} mm "
+                         f"off field center ({', '.join(unreachable)}) -- unreachable.")
+    n_masks = sum(1 for s in schedule if s.get("action") == "mask")
+
     return PflmPreview(
         arrays=arrays, schedule=schedule,
         design_rotation_deg=deg, rotation_is_auto=rotation_is_auto,
@@ -350,7 +420,8 @@ def build_pflm_preview(*, input_path, pinfin_spec, bbox_spec, align_spec,
         required_withinrow_span_mm=sweep_um / 1000.0,
         travel_mm=(travel_um[0] / 1000.0, travel_um[1] / 1000.0),
         stage_y_max_um=stage_y_max_um, within_row_stride=within_row_stride,
-        n_masks=n_masks, notes=notes,
+        n_masks=n_masks, n_align_marks=n_align, align_tol_mm=tol_um / 1000.0,
+        notes=notes,
     )
 
 
@@ -455,7 +526,14 @@ class PreviewItem(QQuickPaintedItem):
         av = self._array_for_step(self._step)
         if av is None:
             return f"expose {entry.get('array_id', '')}"
-        return (f"Expose #{av.step}/{len(self._preview.arrays)} · {av.array_id} · "
+        pv = self._preview
+        if av.is_align:
+            off = max(abs(av.field_offset_mm[0]), abs(av.field_offset_mm[1]))
+            return (f"Align mark #{av.align_index + 1}/{pv.n_align_marks} · {av.array_id} · "
+                    f"{av.passes} passes · lands {off:.1f} mm off center"
+                    + ("" if av.fits_field else f" · OUT OF ±{pv.align_tol_mm:g} mm"))
+        n_pinfin = len(pv.arrays) - pv.n_align_marks
+        return (f"Expose #{av.step}/{n_pinfin} · {av.array_id} · "
                 f"phase {PHASE_LABEL.get(av.phase, '?')} · row {av.row_index}"
                 + ("" if av.has_geometry else " · EMPTY")
                 + ("" if av.fits_field else " · OUT OF FIELD"))
@@ -472,8 +550,12 @@ class PreviewItem(QQuickPaintedItem):
             fit = "feasible" if preview.feasible else "INFEASIBLE"
             rot = (f"auto → {preview.design_rotation_deg}°"
                    if preview.rotation_is_auto else f"{preview.design_rotation_deg}°")
+            n_align = preview.n_align_marks
+            n_pinfin = len(preview.arrays) - n_align
+            arrays_txt = (f"{n_pinfin} arrays"
+                          + (f" + {n_align} align marks" if n_align else ""))
             self._caption = (
-                f"{len(preview.arrays)} arrays · {preview.n_masks} mask pauses · "
+                f"{arrays_txt} · {preview.n_masks} mask pauses · "
                 f"rotation {rot} · sweep {preview.required_withinrow_span_mm:.1f} mm on "
                 f"stage-X · rows {preview.required_row_span_mm:.1f} mm on stage-Y · "
                 f"stage {fit}")
@@ -577,7 +659,9 @@ class PreviewItem(QQuickPaintedItem):
     def _draw_array_box(self, painter: QPainter, view: Viewport, av: ArrayView,
                         selected: bool) -> None:
         poly = QPolygonF([view.point(x, y) for x, y in av.exposed_corners_mm])
-        base = NO_GEOM_COLOR if not av.has_geometry else PHASE_COLORS.get(av.phase, "#8a8a8a")
+        base = (ALIGN_COLOR if av.is_align
+                else NO_GEOM_COLOR if not av.has_geometry
+                else PHASE_COLORS.get(av.phase, "#8a8a8a"))
         colour = QColor(base)
         painter.setBrush(QColor(colour.red(), colour.green(), colour.blue(),
                                 70 if selected else 26))
@@ -590,19 +674,23 @@ class PreviewItem(QQuickPaintedItem):
         painter.setPen(pen)
         painter.drawPolygon(poly)
 
-        # exposure-order number at the array center
+        # exposure-order number (align marks: A1..An) at the center
         c = view.point(*av.exposed_center_mm)
         self._font(painter, 14 if selected else 12, bold=selected)
         painter.setPen(QPen(QColor(SELECT_COLOR if selected else TEXT_2)))
+        label = ("A%d" % (av.align_index + 1)) if av.is_align else str(av.step)
         painter.drawText(QRectF(c.x() - 20, c.y() - 10, 40, 20),
-                         Qt.AlignCenter, str(av.step))
+                         Qt.AlignCenter, label)
 
     def _draw_legend(self, painter: QPainter, rect: QRectF, pv: PflmPreview) -> None:
         self._font(painter, 11, bold=True)
         x = rect.left() + 12
         y = rect.top() + 14
         items = [("Phase A", PHASE_COLORS[0]), ("Phase B", PHASE_COLORS[1]),
-                 ("empty", NO_GEOM_COLOR), ("field ±%g mm" % pv.usable_half_mm, FIELD_COLOR)]
+                 ("empty", NO_GEOM_COLOR)]
+        if pv.n_align_marks:
+            items.append(("align mark", ALIGN_COLOR))
+        items.append(("field ±%g mm" % pv.usable_half_mm, FIELD_COLOR))
         for label, colour in items:
             painter.setBrush(QColor(colour))
             painter.setPen(Qt.NoPen)
@@ -643,28 +731,51 @@ class PreviewItem(QQuickPaintedItem):
             painter.drawText(rect, Qt.AlignCenter, "Mask pause — no array exposed")
             return
 
-        # array bbox translated so its exposed center sits at the field origin
+        # Pinfin arrays center on the field origin (the stage drives the array
+        # center to field zero). Alignment marks center on the closest reachable
+        # point and land off-center by field_offset_mm -- draw them there.
         hw, hh = av.exposed_w_mm / 2.0, av.exposed_h_mm / 2.0
-        base = NO_GEOM_COLOR if not av.has_geometry else PHASE_COLORS.get(av.phase, "#8a8a8a")
+        ox, oy = av.field_offset_mm if av.is_align else (0.0, 0.0)
+        base = (ALIGN_COLOR if av.is_align
+                else NO_GEOM_COLOR if not av.has_geometry
+                else PHASE_COLORS.get(av.phase, "#8a8a8a"))
         colour = QColor(base)
         painter.setBrush(QColor(colour.red(), colour.green(), colour.blue(), 40))
         pen = QPen(colour if av.fits_field else QColor(SEAM_COLOR))
         pen.setWidthF(2.0)
         pen.setCosmetic(True)
         painter.setPen(pen)
-        painter.drawRect(view.rect(-hw, -hh, hw, hh))
+        painter.drawRect(view.rect(ox - hw, oy - hh, ox + hw, oy + hh))
+        if av.is_align and (abs(ox) > 1e-6 or abs(oy) > 1e-6):
+            # guide line from field center to the off-center mark
+            gpen = QPen(QColor(colour.red(), colour.green(), colour.blue(), 150))
+            gpen.setWidthF(1.0)
+            gpen.setCosmetic(True)
+            gpen.setDashPattern([3, 3])
+            painter.setPen(gpen)
+            painter.drawLine(view.point(0, 0), view.point(ox, oy))
 
         self._font(painter, 13, bold=True)
         painter.setPen(QPen(QColor(SELECT_COLOR)))
-        painter.drawText(rect.adjusted(0, 10, 0, 0), Qt.AlignHCenter | Qt.AlignTop,
-                         f"{av.array_id}  ·  exposure #{av.step}  ·  phase "
-                         f"{PHASE_LABEL.get(av.phase, '?')}")
+        if av.is_align:
+            head = (f"{av.array_id}  ·  alignment mark {av.align_index + 1}"
+                    f"  ·  {av.passes} passes")
+        else:
+            head = (f"{av.array_id}  ·  exposure #{av.step}  ·  phase "
+                    f"{PHASE_LABEL.get(av.phase, '?')}")
+        painter.drawText(rect.adjusted(0, 10, 0, 0), Qt.AlignHCenter | Qt.AlignTop, head)
         self._font(painter, 11)
         painter.setPen(QPen(QColor(TEXT_3 if av.fits_field else SEAM_COLOR)))
-        painter.drawText(rect.adjusted(0, 28, 0, 0), Qt.AlignHCenter | Qt.AlignTop,
-                         f"{av.exposed_w_mm:.1f} × {av.exposed_h_mm:.1f} mm  ·  "
-                         f"{av.polygon_count} polygons  ·  "
-                         + ("fits field" if av.fits_field else "EXCEEDS ±%g mm field" % half))
+        if av.is_align:
+            offmag = max(abs(ox), abs(oy))
+            sub = (f"lands {offmag:.1f} mm off field center  ·  "
+                   + (("within ±%g mm" % pv.align_tol_mm) if av.fits_field
+                      else ("EXCEEDS ±%g mm" % pv.align_tol_mm)))
+        else:
+            sub = (f"{av.exposed_w_mm:.1f} × {av.exposed_h_mm:.1f} mm  ·  "
+                   f"{av.polygon_count} polygons  ·  "
+                   + ("fits field" if av.fits_field else "EXCEEDS ±%g mm field" % half))
+        painter.drawText(rect.adjusted(0, 28, 0, 0), Qt.AlignHCenter | Qt.AlignTop, sub)
 
 
 # -------------------------------------------------------------------- backend
@@ -914,8 +1025,12 @@ class Bridge(QObject):
         else:
             self._notes = list(preview.notes)
             self._feasible = preview.feasible
+            n_align = preview.n_align_marks
+            n_pinfin = len(preview.arrays) - n_align
             self._set_status(
-                f"{len(preview.arrays)} arrays · rotation {preview.design_rotation_deg}° · "
+                f"{n_pinfin} arrays"
+                + (f" + {n_align} align marks" if n_align else "")
+                + f" · rotation {preview.design_rotation_deg}° · "
                 + ("stage feasible" if preview.feasible else "STAGE INFEASIBLE"))
         if self._item is not None:
             self._item.set_preview(preview)
