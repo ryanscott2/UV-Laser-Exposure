@@ -1,0 +1,14 @@
+{
+  "_note": "Per-array-type UV-laser etch parameters for the PFLM wafer. Source of truth; consumed by winlase job building. P = number of PASSES (mark-loop count), S = mark speed mm/s. Laser POWER is NOT per-array here -- it stays fixed by the WinLase default profile (Singulation's read-only power/freq safety gate is preserved); only passes + crosshatch angles vary per array. Crosshatch = two fill passes at the listed angles; hatch/pass width 0.01 mm.",
+  "units": {"passes": "count", "speed": "mm_per_s", "hatch": "mm", "angle": "deg"},
+  "fill_style": "crosshatch",
+  "hatch_mm": 0.01,
+  "types": {
+    "D50_sq":  {"diameter_um": 50,  "pitch_um": 100, "lattice": "square", "passes": 44, "speed_mm_s": 400, "fill_angles_deg": [0, 90]},
+    "D100_sq": {"diameter_um": 100, "pitch_um": 150, "lattice": "square", "passes": 37, "speed_mm_s": 400, "fill_angles_deg": [0, 90]},
+    "D300_sq": {"diameter_um": 300, "pitch_um": 350, "lattice": "square", "passes": 20, "speed_mm_s": 400, "fill_angles_deg": [0, 90]},
+    "D50_hex":  {"diameter_um": 50,  "pitch_um": 100, "lattice": "hex", "passes": 42, "speed_mm_s": 400, "fill_angles_deg": [-30, 30]},
+    "D100_hex": {"diameter_um": 100, "pitch_um": 150, "lattice": "hex", "passes": 30, "speed_mm_s": 400, "fill_angles_deg": [-30, 30]},
+    "D300_hex": {"diameter_um": 300, "pitch_um": 350, "lattice": "hex", "passes": 18, "speed_mm_s": 400, "fill_angles_deg": [-30, 30]}
+  }
+}

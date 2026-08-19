@@ -1,0 +1,26 @@
+# Normalize text to LF; byte-stability of vector files is load-bearing
+# (DXFs are validated by comparison, like in the Singulation project).
+* text=auto eol=lf
+
+# Vector / geometry outputs: keep LF so byte comparisons are stable.
+*.dxf   text eol=lf
+*.svg   text eol=lf
+*.csv   text eol=lf
+*.json  text eol=lf
+
+# Binary layout & CAD formats — do NOT let git rewrite line endings.
+# (Singulation's .gitattributes never listed .gds; that is the bug we fix here.)
+*.gds   binary
+*.gds2  binary
+*.oas   binary
+*.stl   binary
+*.step  binary
+*.stp   binary
+*.f3d   binary
+*.zip   binary
+*.png   binary
+*.jpg   binary
+*.pdf   binary
+*.wlj   binary
+*.xlsx  binary
+*.vk4   binary

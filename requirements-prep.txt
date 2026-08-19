@@ -1,0 +1,11 @@
+# Design / prep PC (online, Python 3.11+)
+# Reads GDS, picks layers, builds the exposure plan + per-array centered DXFs,
+# and hosts the PySide6/QML prep app.
+klayout>=0.30        # standalone KLayout Python API (import klayout.db as pya)
+ezdxf>=1.4           # writes AutoCAD R2010 mm DXFs the laser expects
+PySide6>=6.6         # prep app UI (QML FluentWinUI3)
+
+# NOTE: the offline laser PC has its OWN, minimal environment (Python 3.8):
+#   pyserial + pywin32 only, installed from local wheels. It runs the
+#   Tkinter run launcher and the WinLase COM / OptiScan stage code.
+#   It does NOT install klayout/ezdxf/PySide6. See docs/ARCHITECTURE.md.

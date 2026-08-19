@@ -1,0 +1,38 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# --- Generated exposure sets & scratch ---
+output/
+scratch/
+tmp/
+*_center_pass/
+
+# --- Layout source: NEVER commit (user: "GDS stays out of repo") ---
+*.gds
+*.gds2
+*.oas
+
+# --- Laser-PC runtime state (never commit) ---
+laser_pc/.expose_stop
+laser_pc/.expose_ui_root
+laser_pc/.expose_eta.json
+laser_pc/*.wlj
+**/WinLaseJobs/
+
+# --- Taught / machine-specific calibration + tuning (belongs on the laser PC, not the repo) ---
+laser_pc/exposure_calibration.json
+laser_pc/optiscan_positions.json
+# operator-tuned etch table; defaults live in etch_params.py
+laser_pc/etch_params.json
+laser_pc/expose_passes.csv
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
