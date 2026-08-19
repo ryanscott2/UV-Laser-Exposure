@@ -39,6 +39,26 @@ def write_dxf_r2010(path, region, dbu: float) -> None:
     doc.saveas(str(path))
 
 
+def write_rects_r2010(path, rects_um) -> None:
+    """Write axis-aligned rectangles as closed LWPOLYLINEs (R2010 / mm, layer '0').
+
+    ``rects_um`` is a list of ``(l, b, r, t)`` in microns (already centered). Each
+    rectangle is its own simple closed polyline -- used for the dead-space ablation
+    regions, which are decomposed into hole-free rectangles so the fill never covers
+    the pin-field box."""
+    import ezdxf  # lazy
+
+    path = Path(path)
+    doc = ezdxf.new("R2010")
+    doc.header["$INSUNITS"] = 4  # mm
+    msp = doc.modelspace()
+    for (l, b, r, t) in rects_um:
+        pts = [(l / 1000.0, b / 1000.0), (r / 1000.0, b / 1000.0),
+               (r / 1000.0, t / 1000.0), (l / 1000.0, t / 1000.0)]
+        msp.add_lwpolyline(pts, close=True, dxfattribs={"layer": OUTPUT_LAYER_NAME})
+    doc.saveas(str(path))
+
+
 def write_circles_r2010(path, circles_um, dbu: float = None) -> None:
     """Write round pins as true DXF CIRCLE entities (R2010 / mm, layer '0').
 

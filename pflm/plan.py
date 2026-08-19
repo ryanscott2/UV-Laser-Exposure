@@ -42,8 +42,20 @@ from .arrays import (
 # Fixed etch recipe for the alignment-mark layer (etched last, for downstream steps).
 ALIGN_ETCH = {"passes": 15, "speed_mm_s": 400.0, "fill_style": "crosshatch",
               "fill_angles_deg": [0, 90], "hatch_mm": 0.01}
-from .centering import array_circles, clip_and_center, fits_field, region_bbox_um
-from .dxf_writer import write_circles_r2010, write_dxf_r2010
+from .centering import (
+    array_circles,
+    clip_and_center,
+    dead_space_rects_um,
+    fits_field,
+    region_bbox_um,
+)
+from .dxf_writer import write_circles_r2010, write_dxf_r2010, write_rects_r2010
+
+# Dead-space ablation recipe (etched FIRST, per chip, to make the chips mate cleanly).
+# Removes the cell footprint minus the pin-field box; nothing inside the pin box is
+# touched. Faster + shallower than the pin etch; operator-tunable numbers.
+DEAD_SPACE_ETCH = {"passes": 30, "speed_mm_s": 1000.0, "fill_style": "crosshatch",
+                   "fill_angles_deg": [0, 90], "hatch_mm": 0.01}
 from .layers import layer_indices_for_spec, parse_layer_spec, read_layout
 
 # Machine constants (§2, §2.1).
@@ -126,7 +138,9 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
               travel_um=TRAVEL_UM, stage_y_max_um=STAGE_Y_MAX_UM,
               global_offset_um=GLOBAL_OFFSET_UM, row_tol_um=None,
               params_csv=None, pin_mode="polygon", expose_align=True,
-              align_tol_um=ALIGN_TOL_UM, overwrite_in_place=True) -> dict:
+              align_tol_um=ALIGN_TOL_UM, ablate_dead_space=False, cell="4/0",
+              dead_space_etch=None, dead_space_wash=True,
+              overwrite_in_place=True) -> dict:
     """Full prep pipeline; returns the plan dict and writes the set folder.
 
     ``params_csv`` (optional): a design manifest with per-chip etch params keyed
@@ -301,6 +315,66 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
             e = array_records[s["array_id"]].get("etch")
             s["passes"] = (e["passes"] if e else None)
 
+    # ---- PRE-PHASE: dead-space ablation (before the pinfins, per chip) --------
+    # Ablate the chip footprint (cell layer) MINUS the pin-field box so the chips mate
+    # cleanly; nothing inside the pin-field box is touched. One continuous phase, no
+    # masks between chips (the field is smaller than the wafer, so each chip is centered
+    # in turn and its dead space removed), then a single wash/clean pause before pinfins.
+    if ablate_dead_space:
+        dse = dead_space_etch or DEAD_SPACE_ETCH
+        cell_boxes = detect_arrays(layout, cell)
+        note(f"Dead-space ablation: {len(cell_boxes)} cell footprint(s) on {cell}, "
+             f"{dse['passes']} passes @ {dse['speed_mm_s']:.0f} mm/s, crosshatch "
+             f"{dse['fill_angles_deg']} deg; wash-after={dead_space_wash}")
+        if not cell_boxes:
+            warn(f"no cell footprints on layer {cell}; dead-space phase skipped")
+        pin_order = [s["array_id"] for s in schedule if s["action"] == "expose"]
+        ds_steps: list = []
+        ds_row = {"row_index": -1, "exposed_y_center_um": 0.0, "arrays": []}
+        for aid in pin_order:
+            rec0 = array_records.get(aid)
+            if rec0 is None:
+                continue
+            bcx, bcy = rec0["bbox_center_um"]
+            cellbox = min(cell_boxes,
+                          key=lambda b: abs(b.center_um[0] - bcx) + abs(b.center_um[1] - bcy),
+                          default=None)
+            if cellbox is None:
+                warn(f"{aid}: no {cell} cell footprint near chip center; dead-space skipped")
+                continue
+            rects = dead_space_rects_um(
+                cellbox.bbox_um, tuple(rec0["bbox_um"]),
+                design_rotation_deg=deg, global_offset_um=tuple(global_offset_um))
+            ds_aid = "ds_" + aid
+            write_rects_r2010(jobs_dir / f"{ds_aid}.dxf", rects)
+            dsrec = {
+                "array_id": ds_aid, "type": "deadspace",
+                "row_index": -1, "col_index": rec0["col_index"],
+                "bbox_center_um": rec0["bbox_center_um"],
+                "exposed_center_um": rec0["exposed_center_um"],
+                "bbox_um": [round(v, 3) for v in cellbox.bbox_um],
+                "polygon_count": len(rects),
+                "has_geometry": bool(rects),
+                "fits_field": True,
+                "etch": dict(dse),
+                "job_dxf": f"jobs/{ds_aid}.dxf",
+            }
+            array_records[ds_aid] = dsrec
+            ds_row["arrays"].append(dsrec)
+            ds_steps.append({"step": 0, "action": "expose", "array_id": ds_aid,
+                             "row_index": -1, "phase": 0, "type": "deadspace",
+                             "passes": dse["passes"]})
+        if ds_steps:
+            if dead_space_wash:
+                ds_steps.append({"step": 0, "action": "mask",
+                                 "label": "dead-space removal complete -- wash + clean, then Resume"})
+            schedule = ds_steps + schedule       # dead-space phase runs FIRST
+            rows_out.insert(0, ds_row)
+            for i, s in enumerate(schedule):     # renumber the whole schedule
+                s["step"] = i
+            note(f"Dead-space phase prepended: {len(ds_row['arrays'])} ablation step(s)"
+                 + (" + 1 wash pause" if dead_space_wash else ""))
+
     # ---- FINAL PHASE: etch the alignment-mark layer (§ align) ----------------
     # After all pinfins (+ one wash/mask pause), etch each fiducial. Marks only need to be
     # within +/-align_tol_um of field center (not perfectly centered): a mark past the stage
@@ -355,6 +429,10 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
             n_mask = sum(1 for s in schedule if s["action"] == "mask")
 
     align_marks = _align_marks_um(layout, align)
+
+    # final tallies over the complete schedule (dead-space + pinfins + align)
+    n_expose = sum(1 for s in schedule if s["action"] == "expose")
+    n_mask = sum(1 for s in schedule if s["action"] == "mask")
 
     plan = {
         "schema_version": schema_version,

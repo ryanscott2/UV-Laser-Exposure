@@ -57,6 +57,9 @@ def _cmd_build(args) -> int:
         global_offset_um=(args.global_x, args.global_y),
         params_csv=args.params,
         pin_mode=("circle" if args.circles else "polygon"),
+        ablate_dead_space=args.ablate_dead_space,
+        cell=args.cell,
+        dead_space_wash=not args.no_dead_space_wash,
     )
     print(f"Set folder: {set_dir}")
     return 0
@@ -91,6 +94,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="design manifest CSV with per-array etch params (passes, fill angles)")
     p_build.add_argument("--circles", action="store_true",
                          help="export round pins as true DXF CIRCLE entities (fast/compact; for round-pin arrays)")
+    p_build.add_argument("--ablate-dead-space", action="store_true",
+                         help="prepend a dead-space ablation phase: etch each chip's cell "
+                              "footprint minus its pin-field box (nothing in the pin box), per "
+                              "chip, no masks, then one wash pause before the pinfins")
+    p_build.add_argument("--cell", default="4/0",
+                         help="chip-footprint layer for the dead-space phase (default: 4/0)")
+    p_build.add_argument("--no-dead-space-wash", action="store_true",
+                         help="skip the wash/clean pause between dead-space and pinfins")
     p_build.add_argument("--no-backside", action="store_true",
                          help="record backside=false in the plan")
     p_build.add_argument("--output", default=None,

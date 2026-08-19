@@ -127,6 +127,50 @@ def array_circles(layout, pinfin_spec, bbox_um, *, design_rotation_deg=0,
     return circles, bbox
 
 
+def dead_space_rects_um(cell_box_um, field_box_um, *, design_rotation_deg=0,
+                        global_offset_um=(0.0, 0.0)):
+    """Rectangles tiling (cell - field): the chip 'dead space' outside the pin-field
+    box, ablated before the pins so the chips mate cleanly.
+
+    Decomposed into up to four simple, hole-free rectangles (two end strips + two side
+    slivers) so a fill tool ablates ONLY the dead space and never the pin-field box.
+    Returned as ``[(l, b, r, t), ...]`` in microns, centered on the cell center, rotated
+    ``k*90``, plus the calibration ``global_offset_um`` -- the same framing that
+    ``clip_and_center`` applies to the pin geometry, so the stage centers each chip and
+    its dead space lands at the calibrated field center. Zero-area pieces are dropped."""
+    cl, cb, cr, ct = cell_box_um
+    fl, fb, fr, ft = field_box_um
+    ccx = (cl + cr) / 2.0
+    ccy = (cb + ct) / 2.0
+    rel = [
+        (cl, ft, cr, ct),   # top strip (full cell width, above the field box)
+        (cl, cb, cr, fb),   # bottom strip (below the field box)
+        (cl, fb, fl, ft),   # left sliver (field height, left of the field box)
+        (fr, fb, cr, ft),   # right sliver
+    ]
+    k = int(round(design_rotation_deg / 90.0)) % 4
+    gx, gy = global_offset_um
+    out = []
+    for (l, b, r, t) in rel:
+        if (r - l) <= 1e-6 or (t - b) <= 1e-6:
+            continue  # field flush with a cell edge -> no dead space on that side
+        xs = []
+        ys = []
+        for (x, y) in [(l, b), (r, b), (r, t), (l, t)]:
+            x -= ccx
+            y -= ccy
+            if k == 1:
+                x, y = -y, x
+            elif k == 2:
+                x, y = -x, -y
+            elif k == 3:
+                x, y = y, -x
+            xs.append(x + gx)
+            ys.append(y + gy)
+        out.append((min(xs), min(ys), max(xs), max(ys)))
+    return out
+
+
 def region_bbox_um(layout, region):
     """(l, b, r, t) of a region in microns, or None if empty."""
     if region.is_empty():
