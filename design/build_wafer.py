@@ -11,17 +11,21 @@ assembly so the long row-stack axis rides stage-X.
 Round pin = 32-gon circle on layer 2/0 (matches the source pin style). Lattices
 are emitted as regular-array instances of a single pin cell, so the GDS stays
 small. Pure klayout.db; run with the standalone wheel.
+
+Usage:
+    python design/build_wafer.py SRC.gds [-o OUT.gds] [-m MANIFEST.csv] [--etch-params P.json]
+
+Paths are passed on the command line (see -h); nothing is hardcoded to a
+particular machine. --out defaults to PFLM_Wafer_v1_rot90.gds in the current
+directory, and the manifest defaults to <out>_manifest.csv beside it.
 """
 
 from __future__ import annotations
-import math, sys, os, json, csv
+import argparse, math, sys, os, json, csv
 import klayout.db as db
 
 ETCH_PARAMS = os.path.join(os.path.dirname(__file__), "etch_params.json")
-MANIFEST = r"C:/Users/ryan_/OneDrive - Stanford/SU26/UV Laser PFLM/PFLM_Wafer_v1_rot90_manifest.csv"
-
-SRC = r"C:/Users/ryan_/Downloads/072126_PFLM (1).gds"
-OUT = r"C:/Users/ryan_/OneDrive - Stanford/SU26/UV Laser PFLM/PFLM_Wafer_v1_rot90.gds"
+DEFAULT_OUT = "PFLM_Wafer_v1_rot90.gds"   # output GDS name in the CWD; override with --out
 DBU = 0.001                      # 1 nm, matches source
 FRAME_LAYERS = [(0, 0), (1, 0), (4, 0), (5, 0), (6, 0)]  # kept exactly (drop 2/0 old pins, 3/0 heater/pads)
 PIN_LAYER = (2, 0)
@@ -48,8 +52,8 @@ def square_centers(pitch, diam, half=FILL_HALF_UM):
     return [start + i * pitch for i in range(n + 1)]
 
 
-def build_layout():
-    src = db.Layout(); src.read(SRC)
+def build_layout(src_path, out_path):
+    src = db.Layout(); src.read(src_path)
     W = src.cell("Wafer")
     if W is None:
         raise SystemExit("no 'Wafer' cell in source")
@@ -149,7 +153,7 @@ def build_layout():
     # ---- bake +90 rotation: instance design into top rotated -----------------
     top.insert(db.CellInstArray(design.cell_index(), db.Trans(ROT_DEG // 90, False, 0, 0)))
 
-    out.write(OUT)
+    out.write(out_path)
     return out, top, frame_counts, placed
 
 
@@ -160,9 +164,9 @@ def square_centers_rows(dy, diam, half=FILL_HALF_UM):
     return [start + i * dy for i in range(n + 1)]
 
 
-def write_manifest(placed):
+def write_manifest(placed, manifest_path, etch_params_path=ETCH_PARAMS):
     """Tie each chip to its type + etch params, in both design and exposed (rotated) frames."""
-    etch = json.load(open(ETCH_PARAMS))["types"]
+    etch = json.load(open(etch_params_path))["types"]
     cols = ["type", "lattice", "diameter_um", "pitch_um",
             "design_x_um", "design_y_um", "exposed_x_um", "exposed_y_um",
             "pin_count", "passes", "speed_mm_s", "fill_style", "fill_angles_deg", "hatch_mm"]
@@ -180,18 +184,40 @@ def write_manifest(placed):
             "hatch_mm": 0.01,
         })
     rows.sort(key=lambda r: (-r["exposed_y_um"], r["exposed_x_um"]))  # exposed top->bottom, left->right
-    with open(MANIFEST, "w", newline="") as f:
+    with open(manifest_path, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=cols); w.writeheader(); w.writerows(rows)
     return rows
 
 
+def _default_manifest(out_path):
+    """Manifest CSV beside the output GDS: `<out stem>_manifest.csv`."""
+    base, _ext = os.path.splitext(out_path)
+    return base + "_manifest.csv"
+
+
+def _parse_args(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Build the rotated PFLM exposure wafer GDS from a source GDS.")
+    ap.add_argument("src", help="source GDS containing the 'Wafer' cell (frame + old pins)")
+    ap.add_argument("-o", "--out", default=DEFAULT_OUT,
+                    help="output GDS path (default: %(default)s in the current directory)")
+    ap.add_argument("-m", "--manifest", default=None,
+                    help="manifest CSV path (default: <out>_manifest.csv beside --out)")
+    ap.add_argument("--etch-params", default=ETCH_PARAMS,
+                    help="etch-params JSON (default: etch_params.json next to this script)")
+    return ap.parse_args(argv)
+
+
 if __name__ == "__main__":
-    out, top, frame, placed = build_layout()
-    print("wrote", OUT)
+    args = _parse_args()
+    manifest_path = args.manifest or _default_manifest(args.out)
+
+    out, top, frame, placed = build_layout(args.src, args.out)
+    print("wrote", args.out)
     print("frame kept (recursive shape counts):", frame)
     print(f"chips placed: {len(placed)}  (pin circle resolution: {CIRCLE_SEGS}-gon)")
-    rows = write_manifest(placed)
-    print("wrote manifest", MANIFEST)
+    rows = write_manifest(placed, manifest_path, args.etch_params)
+    print("wrote manifest", manifest_path)
     print("exposed-frame layout (top->bottom, left->right):")
     for r in rows:
         print(f"   exposed({r['exposed_x_um']:+6d},{r['exposed_y_um']:+6d})  {r['type']:9s}"
