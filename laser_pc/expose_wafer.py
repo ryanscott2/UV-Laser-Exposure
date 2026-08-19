@@ -32,7 +32,7 @@ dice_wafer.py, which the safety code is adapted from):
     if ANY target is outside travel or over the +STAGE_Y_MAX_UM stage-Y ceiling (the
     P3/P4 ceiling, sec 2.1), or if plan.stage.feasible is false. The offending array_ids
     are printed. Then, when armed, every job's laser profile is read back and verified
-    (power 100 %, freq 30 kHz, mark speed 400 mm/s); any mismatch aborts -- no motion, no
+    (power 100 %, freq 30 kHz, mark speed within 100-1000 mm/s); any mismatch aborts -- no motion, no
     firing. Each job is re-checked once more at mark time. This script never WRITES laser
     power or frequency; it only reads and verifies them.
   * A countdown precedes the run; pressing a key during the countdown, or between arrays /
@@ -74,17 +74,21 @@ DEFAULT_COUNTDOWN_S = 10
 STAGE_Y_MAX_UM_FALLBACK = 6950       # the P3/P4 stage-Y ceiling (sec 2.1); plan/cal override this
 DEFAULT_TRAVEL_UM = (126000, 76000)  # ES111 travel envelope (sec 2)
 
-# Required laser profile -- must match the WinLase "Vector Graphic -> Properties ->
-# Profile" the operator confirmed: power 100 %, frequency 30 kHz, mark speed 400 mm/s.
-# Before ANY stage motion or firing, every job is read back and checked against these;
-# a mismatch aborts the whole run. GetObjProfile index map (same as winlase_build_jobs):
+# Required laser profile -- power and frequency MUST match the WinLase "Vector Graphic
+# -> Properties -> Profile" the operator confirmed (power 100 %, frequency 30 kHz).
+# Mark speed is per-array (400 mm/s pinfins/marks, 1000 mm/s dead-space), so it is not
+# pinned to one value -- the gate only requires it to be a sane speed in the inclusive
+# [100, 1000] mm/s range (whatever the job is set to). Before ANY stage motion or firing,
+# every job is read back and checked against these; a mismatch aborts the whole run.
+# GetObjProfile index map (same as winlase_build_jobs):
 # [0] = mark speed (bits/mSec), [5] = laser power %, [9] = T1 frequency (kHz).
 EXPECTED_LASER_POWER_PCT = 100.0
 EXPECTED_FREQ_KHZ = 30.0
-EXPECTED_MARK_SPEED_MM_S = 400.0
+SPEED_MIN_MM_S = 100.0             # mark speed may be any value in this inclusive range
+SPEED_MAX_MM_S = 1000.0           #   (400 = pinfins/marks, 1000 = dead-space ablation)
 POWER_TOLERANCE_PCT = 0.5
 FREQ_TOLERANCE_KHZ = 0.1
-SPEED_TOLERANCE_MM_S = 10.0
+SPEED_TOLERANCE_MM_S = 10.0        # slop on the 100/1000 bounds (quantization at readback)
 PROFILE_SPEED_IDX, PROFILE_POWER_IDX, PROFILE_FREQ_IDX = 0, 5, 9
 
 # WinLase marking is ASYNCHRONOUS: MarkAllObj starts a pass and returns; GetBusyStatus
@@ -192,9 +196,10 @@ class WinLaseMarker:
             if abs(freq - EXPECTED_FREQ_KHZ) > FREQ_TOLERANCE_KHZ:
                 problems.append("%s obj %d: frequency %.2f kHz (need %.2f kHz)"
                                 % (label, obj, freq, EXPECTED_FREQ_KHZ))
-            if abs(speed - EXPECTED_MARK_SPEED_MM_S) > SPEED_TOLERANCE_MM_S:
-                problems.append("%s obj %d: mark speed %.0f mm/s (need %.0f mm/s)"
-                                % (label, obj, speed, EXPECTED_MARK_SPEED_MM_S))
+            if not (SPEED_MIN_MM_S - SPEED_TOLERANCE_MM_S <= speed
+                    <= SPEED_MAX_MM_S + SPEED_TOLERANCE_MM_S):
+                problems.append("%s obj %d: mark speed %.0f mm/s (must be %.0f-%.0f mm/s)"
+                                % (label, obj, speed, SPEED_MIN_MM_S, SPEED_MAX_MM_S))
         return problems
 
     def verify_job_params(self, wlj: Path):
@@ -836,8 +841,8 @@ def main() -> int:
         # Pre-flight laser gate: read every expose job back and confirm the profile matches
         # the confirmed WinLase settings BEFORE any stage motion or firing. Abort otherwise.
         print("\nverifying laser profile in every job (need power %.0f %%, freq %.2f kHz, "
-              "speed %.0f mm/s) ..." % (EXPECTED_LASER_POWER_PCT, EXPECTED_FREQ_KHZ,
-                                        EXPECTED_MARK_SPEED_MM_S))
+              "speed %.0f-%.0f mm/s) ..." % (EXPECTED_LASER_POWER_PCT, EXPECTED_FREQ_KHZ,
+                                             SPEED_MIN_MM_S, SPEED_MAX_MM_S))
         problems = []
         for _step, aid, _xy in targets:
             wlj = job_path(set_dir, set_name, aid)
