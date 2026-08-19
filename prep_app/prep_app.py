@@ -87,6 +87,7 @@ PHASE_COLORS = {0: "#4cc2ff", 1: "#ffb951"}   # A = blue, B = orange
 PHASE_LABEL = {0: "A", 1: "B"}
 NO_GEOM_COLOR = "#ff99a4"
 ALIGN_COLOR = "#c58cff"       # violet -- alignment marks (final phase)
+DEADSPACE_COLOR = "#d9a066"   # amber -- dead-space ablation (first phase)
 SELECT_COLOR = "#ffffff"
 FIELD_COLOR = "#6ccb5f"
 GUIDE_COLOR = "#7a7a7a"
@@ -99,7 +100,7 @@ FACE = "Segoe UI Variable Text"
 # Every field the UI remembers per dataset.
 DATASET_FIELDS = ("input", "output", "pinfin", "bbox", "align",
                   "rotation", "withinRowStride", "backside",
-                  "globalX", "globalY")
+                  "globalX", "globalY", "ablateDeadSpace")
 
 
 def _today_mmddyy() -> str:
@@ -219,6 +220,8 @@ class ArrayView:
     align_index: int = 0
     field_offset_mm: tuple = (0.0, 0.0)
     passes: int | None = None
+    is_deadspace: bool = False
+    ds_index: int = 0
 
 
 @dataclass
@@ -240,6 +243,7 @@ class PflmPreview:
     n_masks: int
     n_align_marks: int = 0
     align_tol_mm: float = 25.0
+    n_deadspace: int = 0
     notes: list = field(default_factory=list)
 
 
@@ -261,7 +265,8 @@ def build_pflm_preview(*, input_path, pinfin_spec, bbox_spec, align_spec,
                        rotation, within_row_stride,
                        travel_um=TRAVEL_UM, stage_y_max_um=STAGE_Y_MAX_UM,
                        usable_half_um=USABLE_HALF_UM, row_tol_um=None,
-                       align_tol_um=None) -> PflmPreview:
+                       align_tol_um=None, ablate_dead_space=False,
+                       cell_spec="4/0") -> PflmPreview:
     """Build the preview by calling the pflm engine directly: detect arrays,
     group into rows top->bottom, choose/apply the design rotation, and expand
     the mask schedule. Returns a draw-ready, klayout-free structure."""
@@ -423,6 +428,64 @@ def build_pflm_preview(*, input_path, pinfin_spec, bbox_spec, align_spec,
         if unreachable:
             notes.append(f"{len(unreachable)} alignment mark(s) land > ±{tol_um/1000:g} mm "
                          f"off field center ({', '.join(unreachable)}) -- unreachable.")
+
+    # ---- PRE-PHASE: dead-space ablation (mirror pflm.plan.build_set), prepended --
+    # Ablate each chip's cell footprint minus its pin-field box, before the pinfins,
+    # one continuous phase (no masks), then a single wash pause. Prepended to the
+    # schedule + arrays so the preview's step list matches the built plan.json.
+    n_deadspace = 0
+    if ablate_dead_space and cell_spec:
+        try:
+            cell_boxes = list(pflm_arrays.detect_arrays(layout, cell_spec))
+        except Exception as exc:  # noqa: BLE001 - surfaced as a preview note
+            cell_boxes = []
+            notes.append(f"Cell layer '{cell_spec}' not read: {exc}")
+        ds_passes = int(pflm_plan.DEAD_SPACE_ETCH["passes"])
+        pin_avs = [a for a in arrays if not a.is_align and not a.is_deadspace]
+        ds_steps: list = []
+        for av in pin_avs:
+            bcx, bcy = av.bbox_center_um
+            cellbox = min(cell_boxes,
+                          key=lambda b: abs(b.center_um[0] - bcx) + abs(b.center_um[1] - bcy),
+                          default=None)
+            if cellbox is None:
+                continue
+            l, b, r, t = cellbox.bbox_um
+            corners_um = [pflm_arrays.rotate_point_um((l, b), deg),
+                          pflm_arrays.rotate_point_um((r, b), deg),
+                          pflm_arrays.rotate_point_um((r, t), deg),
+                          pflm_arrays.rotate_point_um((l, t), deg)]
+            xs = [x for x, _ in corners_um]
+            ys = [y for _, y in corners_um]
+            n_deadspace += 1
+            ds_aid = "ds_" + av.array_id
+            arrays.append(ArrayView(
+                array_id=ds_aid, row_index=-1, col_index=av.col_index,
+                step=n_deadspace, phase=0,
+                exposed_corners_mm=[(x / 1000.0, y / 1000.0) for x, y in corners_um],
+                exposed_center_mm=av.exposed_center_mm,
+                exposed_center_um=av.exposed_center_um,
+                bbox_center_um=av.bbox_center_um,
+                exposed_w_mm=(max(xs) - min(xs)) / 1000.0,
+                exposed_h_mm=(max(ys) - min(ys)) / 1000.0,
+                polygon_count=0, has_geometry=True, fits_field=True,
+                is_deadspace=True, ds_index=n_deadspace, passes=ds_passes,
+            ))
+            ds_steps.append({"step": 0, "action": "expose", "array_id": ds_aid,
+                             "row_index": -1, "phase": 0, "type": "deadspace",
+                             "passes": ds_passes})
+        if ds_steps:
+            ds_steps.append({"step": 0, "action": "mask",
+                             "label": "dead-space removal complete -- wash + clean, then Resume"})
+            schedule = ds_steps + schedule        # dead-space phase runs FIRST
+            for i, s in enumerate(schedule):      # renumber the whole schedule
+                s["step"] = i
+            notes.append(f"Dead-space ablation: {n_deadspace} chip(s), {ds_passes} passes @ "
+                         f"{pflm_plan.DEAD_SPACE_ETCH['speed_mm_s']:.0f} mm/s, crosshatch "
+                         f"{pflm_plan.DEAD_SPACE_ETCH['fill_angles_deg']} deg -- prepended "
+                         "(no masks, then one wash pause).")
+        elif ablate_dead_space:
+            notes.append(f"Dead-space requested but no cell footprints on '{cell_spec}'.")
     n_masks = sum(1 for s in schedule if s.get("action") == "mask")
 
     return PflmPreview(
@@ -436,7 +499,7 @@ def build_pflm_preview(*, input_path, pinfin_spec, bbox_spec, align_spec,
         travel_mm=(travel_um[0] / 1000.0, travel_um[1] / 1000.0),
         stage_y_max_um=stage_y_max_um, within_row_stride=within_row_stride,
         n_masks=n_masks, n_align_marks=n_align, align_tol_mm=tol_um / 1000.0,
-        notes=notes,
+        n_deadspace=n_deadspace, notes=notes,
     )
 
 
@@ -542,12 +605,16 @@ class PreviewItem(QQuickPaintedItem):
         if av is None:
             return f"expose {entry.get('array_id', '')}"
         pv = self._preview
+        if av.is_deadspace:
+            spd = int(pflm_plan.DEAD_SPACE_ETCH["speed_mm_s"]) if pflm_plan else 1000
+            return (f"Dead-space #{av.ds_index}/{pv.n_deadspace} · {av.array_id} · "
+                    f"{av.passes} passes @ {spd} mm/s · ablate cell minus pin box")
         if av.is_align:
             off = max(abs(av.field_offset_mm[0]), abs(av.field_offset_mm[1]))
             return (f"Align mark #{av.align_index + 1}/{pv.n_align_marks} · {av.array_id} · "
                     f"{av.passes} passes · lands {off:.1f} mm off center"
                     + ("" if av.fits_field else f" · OUT OF ±{pv.align_tol_mm:g} mm"))
-        n_pinfin = len(pv.arrays) - pv.n_align_marks
+        n_pinfin = len(pv.arrays) - pv.n_align_marks - pv.n_deadspace
         return (f"Expose #{av.step}/{n_pinfin} · {av.array_id} · "
                 f"phase {PHASE_LABEL.get(av.phase, '?')} · row {av.row_index}"
                 + ("" if av.has_geometry else " · EMPTY")
@@ -566,8 +633,10 @@ class PreviewItem(QQuickPaintedItem):
             rot = (f"auto → {preview.design_rotation_deg}°"
                    if preview.rotation_is_auto else f"{preview.design_rotation_deg}°")
             n_align = preview.n_align_marks
-            n_pinfin = len(preview.arrays) - n_align
+            n_ds = preview.n_deadspace
+            n_pinfin = len(preview.arrays) - n_align - n_ds
             arrays_txt = (f"{n_pinfin} arrays"
+                          + (f" + {n_ds} dead-space" if n_ds else "")
                           + (f" + {n_align} align marks" if n_align else ""))
             self._caption = (
                 f"{arrays_txt} · {preview.n_masks} mask pauses · "
@@ -674,6 +743,16 @@ class PreviewItem(QQuickPaintedItem):
     def _draw_array_box(self, painter: QPainter, view: Viewport, av: ArrayView,
                         selected: bool) -> None:
         poly = QPolygonF([view.point(x, y) for x, y in av.exposed_corners_mm])
+        if av.is_deadspace:
+            # cell footprint outline framing the chip; amber dashed, no fill/number
+            pen = QPen(QColor(SELECT_COLOR) if selected else QColor(DEADSPACE_COLOR))
+            pen.setWidthF(2.4 if selected else 1.1)
+            pen.setCosmetic(True)
+            pen.setDashPattern([5, 3])
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPolygon(poly)
+            return
         base = (ALIGN_COLOR if av.is_align
                 else NO_GEOM_COLOR if not av.has_geometry
                 else PHASE_COLORS.get(av.phase, "#8a8a8a"))
@@ -703,6 +782,8 @@ class PreviewItem(QQuickPaintedItem):
         y = rect.top() + 14
         items = [("Phase A", PHASE_COLORS[0]), ("Phase B", PHASE_COLORS[1]),
                  ("empty", NO_GEOM_COLOR)]
+        if pv.n_deadspace:
+            items.append(("dead space", DEADSPACE_COLOR))
         if pv.n_align_marks:
             items.append(("align mark", ALIGN_COLOR))
         items.append(("field ±%g mm" % pv.usable_half_mm, FIELD_COLOR))
@@ -751,7 +832,8 @@ class PreviewItem(QQuickPaintedItem):
         # point and land off-center by field_offset_mm -- draw them there.
         hw, hh = av.exposed_w_mm / 2.0, av.exposed_h_mm / 2.0
         ox, oy = av.field_offset_mm if av.is_align else (0.0, 0.0)
-        base = (ALIGN_COLOR if av.is_align
+        base = (DEADSPACE_COLOR if av.is_deadspace
+                else ALIGN_COLOR if av.is_align
                 else NO_GEOM_COLOR if not av.has_geometry
                 else PHASE_COLORS.get(av.phase, "#8a8a8a"))
         colour = QColor(base)
@@ -761,6 +843,17 @@ class PreviewItem(QQuickPaintedItem):
         pen.setCosmetic(True)
         painter.setPen(pen)
         painter.drawRect(view.rect(ox - hw, oy - hh, ox + hw, oy + hh))
+        if av.is_deadspace:
+            # the 10x10 pin-field box is NOT ablated -- draw it as an untouched cut-out
+            painter.setBrush(QColor(SURFACE))
+            hpen = QPen(QColor(PHASE_COLORS[0]))
+            hpen.setWidthF(1.4)
+            hpen.setCosmetic(True)
+            painter.setPen(hpen)
+            painter.drawRect(view.rect(-5.0, -5.0, 5.0, 5.0))
+            self._font(painter, 10)
+            painter.setPen(QPen(QColor(PHASE_COLORS[0])))
+            painter.drawText(view.rect(-5.0, -5.0, 5.0, 5.0), Qt.AlignCenter, "pin box\n(untouched)")
         if av.is_align and (abs(ox) > 1e-6 or abs(oy) > 1e-6):
             # guide line from field center to the off-center mark
             gpen = QPen(QColor(colour.red(), colour.green(), colour.blue(), 150))
@@ -772,7 +865,9 @@ class PreviewItem(QQuickPaintedItem):
 
         self._font(painter, 13, bold=True)
         painter.setPen(QPen(QColor(SELECT_COLOR)))
-        if av.is_align:
+        if av.is_deadspace:
+            head = f"{av.array_id}  ·  dead-space ablation  ·  {av.passes} passes"
+        elif av.is_align:
             head = (f"{av.array_id}  ·  alignment mark {av.align_index + 1}"
                     f"  ·  {av.passes} passes")
         else:
@@ -781,7 +876,11 @@ class PreviewItem(QQuickPaintedItem):
         painter.drawText(rect.adjusted(0, 10, 0, 0), Qt.AlignHCenter | Qt.AlignTop, head)
         self._font(painter, 11)
         painter.setPen(QPen(QColor(TEXT_3 if av.fits_field else SEAM_COLOR)))
-        if av.is_align:
+        if av.is_deadspace:
+            spd = int(pflm_plan.DEAD_SPACE_ETCH["speed_mm_s"]) if pflm_plan else 1000
+            sub = (f"ablate {av.exposed_w_mm:.1f} × {av.exposed_h_mm:.1f} mm cell "
+                   f"minus 10 × 10 pin box  ·  {spd} mm/s")
+        elif av.is_align:
             offmag = max(abs(ox), abs(oy))
             sub = (f"lands {offmag:.1f} mm off field center  ·  "
                    + (("within ±%g mm" % pv.align_tol_mm) if av.fits_field
@@ -1027,6 +1126,8 @@ class Bridge(QObject):
             "align_spec": self._resolve_spec(params.get("align", "")),
             "rotation": str(params.get("rotation", "auto")),
             "within_row_stride": int(params.get("withinRowStride", 2) or 2),
+            "ablate_dead_space": bool(params.get("ablateDeadSpace", False)),
+            "cell_spec": (self._resolve_spec(params.get("cell", "")) or "4/0"),
         })
         self._worker.done.connect(self._preview_done)
         self._worker.start()
@@ -1041,9 +1142,11 @@ class Bridge(QObject):
             self._notes = list(preview.notes)
             self._feasible = preview.feasible
             n_align = preview.n_align_marks
-            n_pinfin = len(preview.arrays) - n_align
+            n_ds = preview.n_deadspace
+            n_pinfin = len(preview.arrays) - n_align - n_ds
             self._set_status(
                 f"{n_pinfin} arrays"
+                + (f" + {n_ds} dead-space" if n_ds else "")
                 + (f" + {n_align} align marks" if n_align else "")
                 + f" · rotation {preview.design_rotation_deg}° · "
                 + ("stage feasible" if preview.feasible else "STAGE INFEASIBLE"))
@@ -1085,6 +1188,10 @@ class Bridge(QObject):
         ]
         if manifest is not None:
             arguments += ["--params", str(manifest)]
+        ablate = bool(params.get("ablateDeadSpace", False))
+        if ablate:
+            cell = self._resolve_spec(params.get("cell", "")) or "4/0"
+            arguments += ["--ablate-dead-space", "--cell", cell]
         if not bool(params.get("backside", True)):
             arguments.append("--no-backside")
 
@@ -1104,6 +1211,12 @@ class Bridge(QObject):
                 "[etch] WARNING: no design manifest (<name>_manifest.csv) beside the GDS -- "
                 "every array will use the DEFAULT 0/90 crosshatch and NO per-array pass "
                 "counts. Put the manifest next to the GDS and rebuild to fix.\n\n")
+        if ablate:
+            self.logAppended.emit(
+                "[dead-space] phase 1: ablate each chip's cell minus its pin box "
+                "(%d passes @ %.0f mm/s), per chip, no masks, then a wash pause.\n\n"
+                % (pflm_plan.DEAD_SPACE_ETCH["passes"],
+                   pflm_plan.DEAD_SPACE_ETCH["speed_mm_s"]))
         self._set_busy(True)
         self._set_status("Building set...")
 

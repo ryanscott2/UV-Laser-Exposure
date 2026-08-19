@@ -55,7 +55,8 @@ ApplicationWindow {
             "withinRowStride": parseInt(strideField.text) || 2,
             "backside": backsideBox.checked,
             "globalX": parseFloat(offsetX.text) || 0.0,
-            "globalY": parseFloat(offsetY.text) || 0.0
+            "globalY": parseFloat(offsetY.text) || 0.0,
+            "ablateDeadSpace": deadSpaceBox.checked
         }
     }
 
@@ -479,6 +480,14 @@ ApplicationWindow {
                                 text: "Backside exposure (flip)"
                                 checked: true
                                 Layout.topMargin: 4
+                            }
+
+                            CheckBox {
+                                id: deadSpaceBox
+                                text: "Ablate dead space first (cell - pin box)"
+                                checked: false
+                                Layout.topMargin: 4
+                                onToggled: root.refresh()
                             }
 
                             Label {
