@@ -74,8 +74,7 @@ import etch_params  # editable per-type etch table (passes + crosshatch angles),
 FILL_SPACING_MM = 0.01             # default hatch / pass width (0.01 mm); per-array override from plan
 FILL_STYLE_PARALLEL = 0            # SetObjFill style: 0 = parallel lines (single angle)
 FILL_STYLE_CROSSHATCH = 2          # SetObjFill style: crosshatch (two-angle fill).
-                                   # VERIFY this enum against the WinLase Automation manual on the
-                                   # machine -- if crosshatch is a different value, change it here.
+                                   # Confirmed correct on the machine (2026-08-18).
 DEFAULT_FILL_ANGLES_DEG = (0.0, 90.0)
 FILL_ANGLE_DEG = 0                 # fallback single angle if a plan array carries no etch params
 NUM_PASSES = 1                     # per-object geometry passes; the per-array etch PASSES (20-44) are
@@ -229,7 +228,7 @@ class WinLaseSession(object):
         self.bits_per_mm = int(self.m.GetLensCalFactor(0, 0))
         if self.bits_per_mm <= 0:
             raise RuntimeError("GetLensCalFactor returned <= 0; is a lens cal loaded?")
-        self._profile_reported = False  # print the read-back laser profile once per run
+        self._reported_speeds = set()   # print the read-back profile once per distinct mark speed
 
     def mm_to_bits(self, mm):
         # type: (float) -> int
@@ -321,11 +320,11 @@ class WinLaseSession(object):
                 "match the required %.0f %% / %.2f kHz -- ABORTING build, no job saved"
                 % (job["array_id"], got_power, got_freq,
                    EXPECTED_LASER_POWER_PCT, EXPECTED_FREQ_KHZ))
-        if not self._profile_reported:
+        if round(got_speed) not in self._reported_speeds:
+            self._reported_speeds.add(round(got_speed))
             print("  laser profile read back from the job: power %.1f %%, freq %.2f kHz, "
-                  "mark speed %.0f mm/s  [must match WinLase Properties]"
+                  "mark speed %.0f mm/s  [power/freq must match WinLase Properties]"
                   % (got_power, got_freq, got_speed))
-            self._profile_reported = True
 
         if int(self.m.IsObjOutOfBounds(obj)):
             warnings.append(
@@ -434,9 +433,9 @@ def main():
     session = WinLaseSession()
     print("\nWinLase attached: %d scan card(s), lens %d bits/mm (field +/-%.1f mm)."
           % (session.cards, session.bits_per_mm, FIELD_BIT_LIMIT / session.bits_per_mm))
-    print("  required laser profile: power %.0f %%, freq %.2f kHz, mark speed %.0f mm/s "
-          "(each job is read back and verified against this)."
-          % (EXPECTED_LASER_POWER_PCT, EXPECTED_FREQ_KHZ, MARK_SPEED_MM_S))
+    print("  required laser profile: power %.0f %%, freq %.2f kHz (fixed); mark speed is "
+          "per-array, verified against each job's own setting (read back once per speed)."
+          % (EXPECTED_LASER_POWER_PCT, EXPECTED_FREQ_KHZ))
     try:
         if args.verify:
             set_dir, jobs, out_dir = plans[0]
