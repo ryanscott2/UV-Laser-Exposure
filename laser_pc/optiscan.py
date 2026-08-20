@@ -66,7 +66,7 @@ TRAVEL_Y_UM = 76_000
 # reports whole-micron position and lands on the commanded coordinate, so this is
 # tight on purpose. If a good move ever trips it, the error prints the actual offset
 # -- loosen only to what the stage genuinely repeats.
-POSITION_TOLERANCE_UM = 3
+POSITION_TOLERANCE_UM = 1
 # Ceiling for the interactive jog step, well under full travel.
 MAX_JOG_STEP_UM = 20_000
 
