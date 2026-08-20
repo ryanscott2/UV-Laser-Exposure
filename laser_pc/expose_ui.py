@@ -183,6 +183,15 @@ class App:
         ttk.Label(params, textvariable=self.resume_hint, foreground="#c0392b",
                   font=("Segoe UI", 9, "bold")).grid(row=0, column=5, sticky="w", padx=(10, 0))
 
+        ttk.Label(params, text="Re-datum (RIS):").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.redatum_var = tk.StringVar(value="move")   # default ON (per-move) for consistent alignment
+        self.redatum_combo = ttk.Combobox(params, textvariable=self.redatum_var, state="readonly",
+                                          width=7, values=["off", "row", "move"])
+        self.redatum_combo.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+        ttk.Label(params, text="RIS before every move / new row to hold alignment on the open-loop "
+                               "stage. Keep the travel path clear; qualify switch repeatability first.",
+                  foreground="#666").grid(row=1, column=2, columnspan=4, sticky="w", pady=(6, 0))
+
         ttk.Label(top, text="(passes + crosshatch come from the Etch table below, applied per array "
                             "type. Start step resumes mid-wafer.)",
                   foreground="#666").grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
@@ -587,6 +596,8 @@ class App:
         for w in (self.start_spin, self.port_entry, self.focus_chk,
                   self.etch_save_btn, self.etch_reset_btn):
             w.config(state="disabled" if busy else "normal")
+        # readonly combobox re-enables to "readonly", not "normal" (else it turns editable)
+        self.redatum_combo.config(state="disabled" if busy else "readonly")
 
     def log(self, text):
         self.log_txt.configure(state="normal")
@@ -723,6 +734,7 @@ class App:
         argv = [EXPOSE, s, "--yes", "--port", self._port(),
                 "--etch-params", ETCH_PARAMS,
                 "--start-step", self._start_step(),
+                "--redatum", (self.redatum_var.get() or "off"),
                 "--stop-flag", STOP_FLAG, "--resume-flag", RESUME_FLAG]
         if armed:
             argv.insert(2, "--arm")
