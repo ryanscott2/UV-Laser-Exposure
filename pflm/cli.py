@@ -20,6 +20,10 @@ from .plan import build_set
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SETS_DIR = REPO_ROOT / "output" / "sets"
 
+# Wafer-flat direction on the stage -> design rotation (deg). The flat-at-bottom GDS is
+# turned so its flat points at the physical flat: front=-Y, right=+X, back=+Y, left=-X.
+JIG_FLAT_DEG = {"front": 0, "right": 90, "back": 180, "left": 270}
+
 
 def _cmd_inspect(args) -> int:
     path = Path(args.gds)
@@ -47,6 +51,10 @@ def _cmd_build(args) -> int:
     rotation = args.rotation
     if rotation != "auto":
         rotation = int(rotation)
+    # --jig-flat is a convenience that maps the wafer-flat direction to a rotation and
+    # overrides --rotation (front=-Y=0, right=+X=90, back=+Y=180, left=-X=270).
+    if getattr(args, "jig_flat", None):
+        rotation = JIG_FLAT_DEG[args.jig_flat]
 
     build_set(
         path, set_dir,
@@ -84,6 +92,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--set", default=None, help="set name (default: GDS stem)")
     p_build.add_argument("--rotation", default="auto",
                          help="auto|0|90|180|270 design rotation")
+    p_build.add_argument("--jig-flat", choices=("front", "right", "back", "left"), default=None,
+                         help="convenience for --rotation from the wafer-flat direction on the "
+                              "stage: front(-Y)=0, right(+X)=90, back(+Y)=180, left(-X)=270. "
+                              "Overrides --rotation when given.")
     p_build.add_argument("--stride", type=int, default=2,
                          help="within-row masking stride (§2.2)")
     p_build.add_argument("--global-x", type=float, default=-3447.0,
