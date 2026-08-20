@@ -130,6 +130,39 @@ class Calibration:
 
         self.stage_y_max_um = float(data.get("stage_y_max_um", STAGE_Y_MAX_UM))
 
+        # Optional EXPLICIT reachable window (absolute stage um). Use this when the usable
+        # travel is not symmetric about 0 -- e.g. a re-datumed rig whose left/right hard
+        # stops and Y stops don't straddle the origin. When present it OVERRIDES the
+        # |x|<=travel_x / -travel_y<=y<=stage_y_max model in check_reachable/stage_targets.
+        # Keys: x_min, x_max, y_min, y_max (any omitted key falls back to the old model bound).
+        r = data.get("reachable_um")
+        if isinstance(r, dict):
+            self.reachable = SimpleNamespace(
+                x_min=float(r.get("x_min", -self.travel_um[0])),
+                x_max=float(r.get("x_max", self.travel_um[0])),
+                y_min=float(r.get("y_min", -self.travel_um[1])),
+                y_max=float(r.get("y_max", self.stage_y_max_um)),
+            )
+        else:
+            self.reachable = None
+
+    def is_reachable(self, sx, sy) -> bool:
+        """True if absolute stage target (sx, sy) um is inside the usable travel. Uses the
+        explicit reachable window if the calibration defines one, else the legacy symmetric
+        model (|x|<=travel_x and -travel_y<=y<=stage_y_max_um)."""
+        r = self.reachable
+        if r is not None:
+            return r.x_min <= sx <= r.x_max and r.y_min <= sy <= r.y_max
+        return (abs(sx) <= self.travel_um[0]
+                and -self.travel_um[1] <= sy <= self.stage_y_max_um)
+
+    def reach_bounds(self):
+        """(x_min, x_max, y_min, y_max) of the usable window, for display/logging."""
+        r = self.reachable
+        if r is not None:
+            return (r.x_min, r.x_max, r.y_min, r.y_max)
+        return (-self.travel_um[0], self.travel_um[0], -self.travel_um[1], self.stage_y_max_um)
+
     def to_dict(self) -> dict:
         return {
             "units": self.units,
@@ -149,6 +182,10 @@ class Calibration:
             },
             "travel_um": [self.travel_um[0], self.travel_um[1]],
             "stage_y_max_um": self.stage_y_max_um,
+            **({"reachable_um": {
+                "x_min": self.reachable.x_min, "x_max": self.reachable.x_max,
+                "y_min": self.reachable.y_min, "y_max": self.reachable.y_max,
+            }} if self.reachable is not None else {}),
         }
 
     def nudge_for(self, array_id):
@@ -232,11 +269,6 @@ def check_reachable(plan: dict, cal: Calibration):
     ``(ok, failures)`` where ``failures`` is the list of offending ``array_id`` strings
     (empty when ``ok`` is True). Called by the laser-PC pre-flight (section 7.3).
     """
-    travel_x = cal.travel_um[0]
-    travel_y = cal.travel_um[1]
-    y_ceiling = cal.stage_y_max_um
-    y_floor = -travel_y
-
     failures = []
     for arr in _iter_arrays(plan):
         array_id = arr.get("array_id")
@@ -245,7 +277,7 @@ def check_reachable(plan: dict, cal: Calibration):
             failures.append(array_id)
             continue
         sx, sy = wafer_to_stage(exposed, cal, array_id)
-        if abs(sx) > travel_x or sy < y_floor or sy > y_ceiling:
+        if not cal.is_reachable(sx, sy):
             failures.append(array_id)
 
     return (len(failures) == 0, failures)
@@ -253,10 +285,6 @@ def check_reachable(plan: dict, cal: Calibration):
 
 def stage_targets(plan: dict, cal: Calibration):
     """List of ``(array_id, stage_x, stage_y, reachable)`` for every array (for `--list`)."""
-    travel_x = cal.travel_um[0]
-    travel_y = cal.travel_um[1]
-    y_ceiling = cal.stage_y_max_um
-    y_floor = -travel_y
     out = []
     for arr in _iter_arrays(plan):
         array_id = arr.get("array_id")
@@ -265,8 +293,7 @@ def stage_targets(plan: dict, cal: Calibration):
             out.append((array_id, None, None, False))
             continue
         sx, sy = wafer_to_stage(exposed, cal, array_id)
-        ok = (abs(sx) <= travel_x) and (y_floor <= sy <= y_ceiling)
-        out.append((array_id, sx, sy, ok))
+        out.append((array_id, sx, sy, cal.is_reachable(sx, sy)))
     return out
 
 

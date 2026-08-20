@@ -676,7 +676,7 @@ def _local_reach(x: int, y: int, travel_x: int, travel_y: int, ceil: int) -> boo
 
 
 def print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, focus, armed,
-                   travel_x, travel_y, ceil):
+                   travel_x, travel_y, ceil, cal):
     tmap = {id(step): xy for step, _aid, xy in targets}
     rot = plan.get("design_rotation_deg", "?")
     strat = plan.get("mask_strategy", {}) or {}
@@ -690,14 +690,15 @@ def print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, fo
           % (rot, plan.get("exposure_order", "?"),
              strat.get("within_row_stride", "?"), n_expose, n_mask, total_passes,
              " | focus on" if focus else ""))
-    print("  stage limits: |X| <= %d um, %d <= Y <= %d um (ceiling)"
-          % (travel_x, -travel_y, ceil))
+    _xmn, _xmx, _ymn, _ymx = cal.reach_bounds()
+    print("  stage window: %.0f <= X <= %.0f um, %.0f <= Y <= %.0f um (usable travel)"
+          % (_xmn, _xmx, _ymn, _ymx))
     for step in plan.get("schedule", []):
         s = int(step.get("step", -1))
         if step.get("action") == "expose":
             aid = step.get("array_id")
             xy = tmap.get(id(step))
-            reach = "OK " if (xy and _local_reach(xy[0], xy[1], travel_x, travel_y, ceil)) else "OUT"
+            reach = "OK " if (xy and cal.is_reachable(xy[0], xy[1])) else "OUT"
             a = arrays.get(aid, {}) or {}
             typ = a.get("type") or "?"
             print("  [%3d] expose %-8s %-9s row %s ph %s  ->  X=%-8d Y=%-8d  %sx%s pass  %s"
@@ -869,11 +870,12 @@ def main() -> int:
         }
 
     print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, args.focus, args.arm,
-                   travel_x, travel_y, ceil)
+                   travel_x, travel_y, ceil, cal)
 
     ok, feasible, failures = preflight(plan, cal, travel_x, travel_y, ceil)
-    print("\npre-flight: plan.stage.feasible=%s | reachable=%s (|X|<=%d, Y<=%d ceiling)"
-          % (str(feasible).lower(), "yes" if ok else "NO", travel_x, ceil))
+    _bx0, _bx1, _by0, _by1 = cal.reach_bounds()
+    print("\npre-flight: plan.stage.feasible=%s | reachable=%s (X[%.0f,%.0f] Y[%.0f,%.0f] um)"
+          % (str(feasible).lower(), "yes" if ok else "NO", _bx0, _bx1, _by0, _by1))
     if not feasible:
         print("  plan.stage marks this set INFEASIBLE (rotated spans do not fit travel/ceiling).")
     if failures:
