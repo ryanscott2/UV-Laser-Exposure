@@ -104,9 +104,11 @@ MARK_WAIT_TIMEOUT_S = 900.0  # default max wait per mark pass to go idle (--mark
                              # STOP at any moment during the wait, so it can be generous.
 
 # Time-estimate (ETA): empirical, measured live. Emitted as "[eta] ..." lines that the
-# launcher UI mirrors into its Est. time field. A small per-set cache warm-starts it.
-# Cosmetic only -- never affects motion or firing. Mask pauses are operator-driven and are
-# NOT included in the estimate.
+# launcher UI parses into its Time-to-next-pause and Est. remaining/total fields. Each line
+# carries "next <wash|mask> ~M:SS" (machine time until the operator's next wash/mask break)
+# alongside "remaining ~.. | total ~..". A small per-set cache warm-starts it. Cosmetic only
+# -- never affects motion or firing. The pause DWELL is operator-driven and NOT counted in
+# any estimate; "next pause" is time-until-you-must-touch-the-machine, not including the break.
 ETA_LOG_INTERVAL_S = 15.0
 DEFAULT_MOVE_S = 8.0
 DEFAULT_ETA_CACHE = Path(__file__).resolve().parent / ".expose_eta.json"
@@ -229,7 +231,9 @@ class WinLaseMarker:
 
         For the live estimate, `on_pass(i, dt)` is REPLAYED once per pass with the measured
         average per-pass time after the mark finishes (WinLase runs the passes in one op, so
-        there is no per-pass callback during it). Returns False if aborted."""
+        there is no per-pass callback during it). A "[mark] started ..." line is printed the
+        instant MarkAllObj is issued so the launcher UI can close a mask-pause modal only
+        once the laser is genuinely re-engaged. Returns False if aborted."""
         n = max(1, int(passes))
         job_index = int(self.m.LoadJobFromFile(str(wlj.resolve())))
         self.m.SetActiveJob(job_index)
@@ -258,6 +262,12 @@ class WinLaseMarker:
                 return False
             t0 = time.time()
             self.m.MarkAllObj(0)          # async: WinLase runs ALL n passes (alternating angles)
+            # WinLase has accepted the mark (MarkAllObj issued, laser re-engaged). Emit a
+            # machine-parseable confirmation the launcher UI keys off to close a mask-pause
+            # modal only once marking has ACTUALLY started -- not optimistically on the
+            # Resume click. Printed after MarkAllObj so an abort during the pre-mark drain
+            # (above) returns False first and never emits a false confirmation.
+            print("[mark] started %s (%d passes)" % (wlj.name, n))
             time.sleep(MARK_SETTLE_S)     # let the mark register as busy before polling
             # The whole n-pass mark must fit the wait, so scale the per-pass budget by n.
             if not self._wait_not_busy(abort, self.mark_timeout * n):
@@ -355,12 +365,18 @@ class EtaTracker:
     schedule order.
     """
 
-    def __init__(self, labels, passes, warm=None, final_move=False, emit=print):
+    def __init__(self, labels, passes, warm=None, final_move=False, pauses=None, emit=print):
         self.labels = list(labels)
         # `passes` may be an int (uniform) or a dict label->passes (per-array).
         self.passes = passes
         self.warm = dict(warm or {})
         self.final_move = bool(final_move)
+        # `pauses`: (after_expose_idx, kind) per mask/wash step, where after_expose_idx is
+        # the index (into `labels`) of the last expose that runs BEFORE that pause and kind
+        # is "wash" or "mask". Lets us estimate time-to-next-pause (the operator's next
+        # wash/mask break), separate from time-to-finish. The pause DWELL itself is
+        # operator-driven and excluded from every estimate, same as before.
+        self.pauses = list(pauses or [])
         self.emit = emit
         self.per_pass = {label: [] for label in self.labels}
         self.moves = []
@@ -436,6 +452,35 @@ class EtaTracker:
         total += max(0, remaining_moves) * self._move_est()
         return total, known
 
+    def _next_pause(self):
+        """(seconds_until_next_pause, kind) from where we are now, or (None, None) if no
+        wash/mask pause remains ahead. It is the time to finish the CURRENT array's
+        remaining passes, then fully run every array up to and including the last expose
+        before that pause, plus the stage moves to reach them. The pause dwell itself
+        (operator wash/mask) is excluded -- this is 'how long until you next have to touch
+        the machine'."""
+        if not self.labels:
+            return None, None
+        nxt = None
+        for after_idx, kind in self.pauses:
+            if after_idx >= self.cur_idx:
+                nxt = (after_idx, kind)
+                break
+        if nxt is None:
+            return None, None
+        after_idx, kind = nxt
+        cur = self._per_pass_est(self.labels[self.cur_idx])
+        if cur is None:
+            cur = 0.0
+        total = max(0, self._np(self.labels[self.cur_idx]) - self.cur_pass) * cur
+        for idx in range(self.cur_idx + 1, min(after_idx, len(self.labels) - 1) + 1):
+            est = self._per_pass_est(self.labels[idx])
+            if est is None:
+                est = 0.0
+            total += self._np(self.labels[idx]) * est
+        total += max(0, after_idx - self.cur_idx) * self._move_est()
+        return total, kind
+
     def per_pass_means(self):
         out = {}
         for label in self.labels:
@@ -461,8 +506,10 @@ class EtaTracker:
             total += self._np(label) * pp
         moves = len(self.labels) + (1 if self.final_move else 0)
         total += moves * self._move_est()
-        self.emit("[eta] estimated total ~%s (%d total passes, from this set's last armed run)"
-                  % (_fmt_dur(total), self._total_passes()))
+        np_secs, np_kind = self._next_pause()
+        pause_txt = (" | next %s ~%s" % (np_kind, _fmt_dur(np_secs))) if np_secs is not None else ""
+        self.emit("[eta] estimated total ~%s (%d total passes, from this set's last armed run)%s"
+                  % (_fmt_dur(total), self._total_passes(), pause_txt))
 
     def _maybe_emit(self, force):
         if not self.labels:
@@ -476,13 +523,18 @@ class EtaTracker:
         done = sum(len(v) for v in self.per_pass.values())
         total_passes = self._total_passes()
         label = self.labels[self.cur_idx]
+        np_secs, np_kind = self._next_pause()
+        if np_secs is not None:
+            pause_txt = "next %s ~%s" % (np_kind, _fmt_dur(np_secs))
+        else:
+            pause_txt = "no more pauses"
         if known:
             tail = "remaining ~%s | total ~%s" % (_fmt_dur(remaining), _fmt_dur(elapsed + remaining))
         else:
             tail = "remaining estimating..."
-        self.emit("[eta] elapsed %s | %s (%d/%d) pass %d/%d | %d/%d passes | %s"
+        self.emit("[eta] elapsed %s | %s (%d/%d) pass %d/%d | %d/%d passes | %s | %s"
                   % (_fmt_dur(elapsed), label, self.cur_idx + 1, len(self.labels),
-                     self.cur_pass, self._np(label), done, total_passes, tail))
+                     self.cur_pass, self._np(label), done, total_passes, pause_txt, tail))
 
     def finish(self):
         elapsed = time.time() - (self.run_t0 or time.time())
@@ -724,6 +776,13 @@ def main() -> int:
     p.add_argument("--arm", action="store_true", help="ACTUALLY fire the laser (default: simulate)")
     p.add_argument("--focus", action="store_true",
                    help="set Z from the calibration reference before each mark (needs motor)")
+    p.add_argument("--redatum", choices=["off", "row", "move"], default="off",
+                   help="re-establish the stage datum with RIS to stop an open-loop run from "
+                        "accumulating drift: 'move'=before every array, 'row'=before each new "
+                        "physical row, 'off'=never (default). RIS drives to the hard limits, so "
+                        "keep the full-travel path clear; only as accurate as the limit-switch "
+                        "repeatability -- qualify that first (see docs). Runs in dry-run too "
+                        "(stage-only, no laser), so the cadence can be tested unarmed.")
     p.add_argument("--countdown", type=int, default=DEFAULT_COUNTDOWN_S)
     p.add_argument("--start-step", type=int, default=0,
                    help="resume mid-wafer: begin at this schedule step index")
@@ -896,6 +955,20 @@ def main() -> int:
     run_steps = schedule[start:]
     # ETA labels: the exposures that will actually run, in order.
     labels = [step.get("array_id") for step in run_steps if step.get("action") == "expose"]
+    # Pause map for the "time to next pause" estimate: for each mask/wash step in the run
+    # slice, the index (into `labels`) of the last expose that precedes it, plus its kind
+    # ("wash" if the plan label mentions a wash/clean, else "mask"). A pause before any
+    # expose maps to -1 (already behind the first array) and is simply never "ahead".
+    pauses = []
+    _exp_i = -1
+    for step in run_steps:
+        act = step.get("action")
+        if act == "expose":
+            _exp_i += 1
+        elif act == "mask":
+            lbl = (step.get("label") or "").lower()
+            kind = "wash" if ("wash" in lbl or "clean" in lbl) else "mask"
+            pauses.append((_exp_i, kind))
 
     rc = 0
     completed = False
@@ -903,7 +976,7 @@ def main() -> int:
     try:
         warm = load_eta_cache(DEFAULT_ETA_CACHE, set_name)
         eta = EtaTracker(labels, {l: passes_by_label[l] for l in labels},
-                         warm=warm, final_move=False)
+                         warm=warm, final_move=False, pauses=pauses)
         if warm:
             eta.preview()
         elif not args.arm:
@@ -919,6 +992,7 @@ def main() -> int:
         # is aborted mid-mark is NOT counted (so resume re-does it); a mask that the operator
         # stops AT (having masked) IS counted (so resume continues past it, e.g. after a wash).
         done_through = start - 1
+        last_row = None                       # for --redatum row: re-datum when this changes
         for step in run_steps:
             action = step.get("action")
             s = int(step.get("step", -1))
@@ -926,6 +1000,27 @@ def main() -> int:
                 exp_idx += 1
                 aid = step.get("array_id")
                 a = arrays[aid]
+                row_i = step.get("row_index")
+                # Optional re-datum (RIS) to keep the open-loop stage from accumulating drift
+                # over the run: 'move' before every array, 'row' when entering a new physical
+                # row (row_index is never None here, so the first array always re-datums).
+                # RIS drives to the hard limits -- path must be clear. A failure is a controlled
+                # stop: never move/fire on a datum we could not re-establish.
+                if args.redatum == "move" or (args.redatum == "row" and row_i != last_row):
+                    print("[redatum] RIS before %s (restoring index at the hard limits) ..." % aid)
+                    try:
+                        rx, ry = stage.redatum()
+                    except (RuntimeError, TimeoutError, ValueError) as exc:
+                        print("*** re-datum (RIS) FAILED before %s: %s -- controlled stop, "
+                              "not firing. ***" % (aid, exc))
+                        stopped = True
+                        break
+                    print("[redatum] datum restored; stage reads X=%d Y=%d" % (rx, ry))
+                    if abort():
+                        print("aborted after re-datum, before moving to %s." % aid)
+                        stopped = True
+                        break
+                last_row = row_i
                 tx, ty = transform.wafer_to_stage(a["exposed_center_um"], cal)
                 tx, ty = int(round(tx)), int(round(ty))
                 print("\n[%d %s] move -> X=%d Y=%d" % (s, aid, tx, ty))

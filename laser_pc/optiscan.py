@@ -51,6 +51,7 @@ DEFAULT_PORT = "COM5"
 BAUD = 9600
 CR = b"\r"
 MOVE_TIMEOUT_S = 120.0   # generous: the stage is slow, and a full-travel move must not time out
+RIS_TIMEOUT_S = 180.0    # RIS drives full-travel to the hard limits and back -- allow extra
 POLL_S = 0.05
 STATION_KEYS = ("P1", "P2", "P3", "P4")
 
@@ -332,6 +333,21 @@ class OptiScan:
         self.command("GZ,%d" % int(z), expect="R")
         if wait:
             self.wait_idle()
+
+    def redatum(self):
+        """Re-establish the absolute datum by restoring the index (RIS): the controller
+        drives to the +X/+Y hard limits, re-zeroes there, and returns. Call before a move so
+        an open-loop run cannot accumulate drift -- each placement then starts from a freshly
+        referenced frame.
+
+        RIS drives the stage over its FULL travel to the hard limits, so the whole path must
+        be clear (same collision caveat as the ``index`` CLI command). Blocks until the index
+        move finishes; returns the reported (x, y). This is only as accurate as the stage's
+        limit-switch REPEATABILITY -- RIS/SIS both lean on those switches, so if they do not
+        repeat this does not help. Qualify that repeatability before trusting it for placement."""
+        self.command("RIS")                       # controller drives to limits, re-zeroes, returns
+        self.wait_idle(timeout_s=RIS_TIMEOUT_S)
+        return self.stage_position()
 
     def move_rel(self, dx: int, dy: int, wait: bool = True) -> None:
         cx, cy = self.stage_position()
