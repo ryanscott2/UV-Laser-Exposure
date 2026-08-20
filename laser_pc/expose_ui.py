@@ -787,11 +787,39 @@ class App:
             return
         self._run(self._expose_argv(s, armed=True))
 
+    def _cal(self):
+        """Load the exposure calibration (reference + reachable window) via transform, so
+        Home/Extract can target real stage coordinates. Keeps optiscan.py calibration-free;
+        the UI computes the target and drives it with the generic `goto`. None on failure."""
+        try:
+            import transform
+            p = HERE / "exposure_calibration.json"
+            return (transform.load_calibration(str(p)) if p.is_file()
+                    else transform.default_calibration())
+        except Exception as exc:
+            messagebox.showwarning("UV Laser Exposure", "could not load calibration: %s" % exc)
+            return None
+
     def home(self):
-        self._run([OPTISCAN, "--port", self._port(), "home", "--yes"])
+        """Send the stage to the FIELD CENTER (wafer origin under the fixed field) = the
+        calibration reference. Raw stage 0,0 is unreachable on the re-datumed rig (left of
+        the +X clamp), so Home goes to reference.stage_um instead of goto(0,0)."""
+        cal = self._cal()
+        if cal is None:
+            return
+        x, y = int(round(cal.reference.stage.x)), int(round(cal.reference.stage.y))
+        self.log("[home] -> field center (calibration reference) X=%d Y=%d" % (x, y))
+        self._run([OPTISCAN, "--port", self._port(), "goto", "--x", x, "--y", y, "--yes"])
 
     def extract(self):
-        self._run([OPTISCAN, "--port", self._port(), "extract", "--yes"])
+        """Send the stage to the +X/+Y corner of the usable window (for load/unload)."""
+        cal = self._cal()
+        if cal is None:
+            return
+        _x0, x1, _y0, y1 = cal.reach_bounds()   # (x_min, x_max, y_min, y_max); +X/+Y = (x_max, y_max)
+        x, y = int(round(x1)), int(round(y1))
+        self.log("[extract] -> +X/+Y corner X=%d Y=%d" % (x, y))
+        self._run([OPTISCAN, "--port", self._port(), "goto", "--x", x, "--y", y, "--yes"])
 
     def stop(self):
         try:
