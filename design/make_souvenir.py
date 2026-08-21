@@ -4,47 +4,53 @@ No pipeline change needed: every letter is a glyph on the pinfin layer (3/0) ins
 per-letter bbox (4/0), so pflm.build_set detects each letter as an array and the stage steps to
 each one, centered in the field -> the letters land at their true positions and spell the text.
 
-Three lines, centered on the wafer, sized so the longest line (17 chars) nearly spans it:
+Three lines, centered on the wafer, with per-line sizing (LINE_SCALE): the name is emphasized,
+the rest smaller (x1.5 line 1, x0.75 lines 2-3). Two souvenirs are generated (see SOUVENIRS).
 
-    Ryan Scott
-    Stanford NanoHeat
-    Summer 2026
-
-Build:  python -m pflm.cli build design/souvenir_ryan.gds --set output/DXFs/souvenir --no-align
+Build:  python -m pflm.cli build design/souvenir_ryan.gds --set souvenir_ryan
+        python -m pflm.cli build design/souvenir_v2.gds   --set souvenir_v2
 """
 from __future__ import annotations
 import math
 import klayout.db as pya
 
-LINES = ["Ryan Scott", "Stanford NanoHeat", "Summer 2026"]
-GLYPH_H_UM = 6000.0          # letter height
-CELL_GAP_UM = 900.0          # horizontal gap budget between adjacent letter cells
-BBOX_MARGIN_UM = 250.0       # bbox is this much bigger than the glyph (so it never clips)
-LINE_PITCH_UM = 10500.0      # top/bottom line centers at +/- this (<= ~21 mm reachable in Y)
+# Each souvenir: three lines + output GDS. Same text scales for all (LINE_SCALE below).
+SOUVENIRS = [
+    {"lines": ["Ryan Scott", "Stanford NanoHeat", "Summer 2026"], "out": "design/souvenir_ryan.gds"},
+    {"lines": ["Jess+Ryan", "California Trip", "Summer 2026"],    "out": "design/souvenir_v2.gds"},
+]
+
+LINE_SCALE = [1.5, 0.75, 0.75]   # line 1 (name) 50% bigger; lines 2-3 25% smaller
+BASE_GLYPH_H_UM = 6000.0         # 1.0x letter height
+CELL_GAP_FRAC = 0.15             # inter-letter gap, as a fraction of glyph width
+BBOX_HALF_W_FRAC = 0.54          # letter-cell bbox half-width, x glyph width (< advance/2 -> no overlap)
+BBOX_HALF_H_FRAC = 0.60          # letter-cell bbox half-height, x glyph height
+LINE_GAP_UM = 3500.0             # vertical gap between line edges
 WAFER_R_UM = 50000.0
 PIN_LAYER, BBOX_LAYER, FRAME_LAYER = (3, 0), (4, 0), (1, 0)
-OUT = "design/souvenir_ryan.gds"
 
 
 def _um(ly, v):
     return int(round(v / ly.dbu))
 
 
-def build():
+def build(lines, out):
     ly = pya.Layout(); ly.dbu = 0.001
     top = ly.create_cell("SOUVENIR")
     Lp, Lb, Lf = ly.layer(*PIN_LAYER), ly.layer(*BBOX_LAYER), ly.layer(*FRAME_LAYER)
     tg = pya.TextGenerator.default_generator()
 
-    # Scale the font to GLYPH_H_UM and monospace it on the widest glyph.
-    chars = {c for line in LINES for c in line if c != " "}
+    chars = {c for line in lines for c in line if c != " "}
     h1 = max(tg.text(c, ly.dbu, 1.0).bbox().height() * ly.dbu for c in chars)
     w1 = max(tg.text(c, ly.dbu, 1.0).bbox().width() * ly.dbu for c in chars)
-    mag = GLYPH_H_UM / h1
-    glyph_w = w1 * mag
-    advance = glyph_w + CELL_GAP_UM
-    half_w = glyph_w / 2.0 + BBOX_MARGIN_UM
-    half_h = GLYPH_H_UM / 2.0 + BBOX_MARGIN_UM
+
+    # Vertical stack, centered as a block on the wafer origin.
+    heights = [BASE_GLYPH_H_UM * s for s in LINE_SCALE]
+    cursor = (sum(heights) + LINE_GAP_UM * (len(lines) - 1)) / 2.0
+    line_y = []
+    for h in heights:
+        line_y.append(cursor - h / 2.0)
+        cursor -= (h + LINE_GAP_UM)
 
     # Wafer outline (reference only; not exposed).
     top.shapes(Lf).insert(pya.Polygon(
@@ -53,9 +59,15 @@ def build():
          for i in range(512)]))
 
     n_letters = 0
-    extents = []
-    for li, line in enumerate(LINES):
-        y = (1 - li) * LINE_PITCH_UM         # li 0 -> +pitch (top), 1 -> 0, 2 -> -pitch (bottom)
+    xs, ys = [], []
+    summary = []
+    for li, line in enumerate(lines):
+        gh = heights[li]
+        mag = gh / h1
+        gw = w1 * mag
+        advance = gw * (1.0 + CELL_GAP_FRAC)
+        half_w, half_h = gw * BBOX_HALF_W_FRAC, gh * BBOX_HALF_H_FRAC
+        y = line_y[li]
         n = len(line)
         x0 = -(n * advance) / 2.0 + advance / 2.0
         for ci, ch in enumerate(line):
@@ -71,18 +83,18 @@ def build():
             top.shapes(Lb).insert(pya.Box(_um(ly, cx - half_w), _um(ly, y - half_h),
                                           _um(ly, cx + half_w), _um(ly, y + half_h)))
             n_letters += 1
-            extents.append((cx - half_w, y - half_h, cx + half_w, y + half_h))
+            xs += [cx - half_w, cx + half_w]; ys += [y - half_h, y + half_h]
+        summary.append("  '%s': x%.2f -> glyph %.2f x %.2f mm, line width %.1f mm, y=%+.1f mm"
+                       % (line, LINE_SCALE[li], gw / 1000, gh / 1000, n * advance / 1000, y / 1000))
 
-    ly.write(OUT)
-    xs = [e[0] for e in extents] + [e[2] for e in extents]
-    ys = [e[1] for e in extents] + [e[3] for e in extents]
+    ly.write(out)
     corner_r = max((x * x + yy * yy) ** 0.5 for x in (min(xs), max(xs)) for yy in (min(ys), max(ys)))
-    print("wrote %s" % OUT)
-    print("  %d letters, glyph %.2f x %.2f mm, advance %.2f mm, line pitch %.1f mm"
-          % (n_letters, glyph_w / 1000, GLYPH_H_UM / 1000, advance / 1000, LINE_PITCH_UM / 1000))
-    print("  text extent X[%.1f,%.1f] Y[%.1f,%.1f] mm; farthest corner r=%.1f mm (wafer r=50)"
+    print("wrote %s  (%d letters)" % (out, n_letters))
+    print("\n".join(summary))
+    print("  text extent X[%.1f,%.1f] Y[%.1f,%.1f] mm; farthest corner r=%.1f mm (wafer r=50)\n"
           % (min(xs) / 1000, max(xs) / 1000, min(ys) / 1000, max(ys) / 1000, corner_r / 1000))
 
 
 if __name__ == "__main__":
-    build()
+    for s in SOUVENIRS:
+        build(s["lines"], s["out"])
