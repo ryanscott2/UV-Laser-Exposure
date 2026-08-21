@@ -22,12 +22,22 @@ except ImportError:
 
 from .layers import layer_indices_for_spec, parse_layer_spec
 
-# Singulation's solved taught mapping (§2.1 / §6), same wafer/stage/jig family.
-# Used ONLY as a machine-independent default to project design coordinates onto a
-# nominal stage-Y so ``choose_rotation`` can test the P3/P4 ceiling. Treated as an
-# unverified starting point; the laser PC re-checks with the real taught reference.
-DEFAULT_STAGE_REF_UM = (5590.0, -18450.0)  # stage target for wafer (0, 0)
-DEFAULT_AXES = (-1, 1)                      # (sx, sy): stage_X = 5590 - wx, stage_Y = -18450 + wy
+# NOMINAL taught mapping + usable window for the prep feasibility PRE-CHECK. These mirror the
+# definitive laser-PC calibration (laser_pc/exposure_calibration.json) so the prep's reachability
+# verdict matches transform.is_reachable; the laser PC re-checks with the real taught reference at
+# run time, so treat these as an unverified nominal pre-check.
+DEFAULT_STAGE_REF_UM = (84355.0, -19056.0)  # stage target for wafer (0, 0) [definitive]
+DEFAULT_AXES = (-1, 1)                       # (sx, sy): stage_X = ref_x - wx (backside mirror), stage_Y = ref_y + wy
+# ASYMMETRIC usable stage window (a pipe caps -Y at -38140); matches exposure_calibration.json
+# reachable_um. Feasibility projects each array center to an absolute stage target and requires it
+# inside this box -- NOT the old symmetric +/-126000 x +/-76000 envelope (which over-stated -Y room).
+REACHABLE_UM = (16236.0, 138529.0, -38140.0, 0.0)  # (x_min, x_max, y_min, y_max)
+# An array whose ideal stage center lands just beyond REACHABLE_UM is still exposable: the stage
+# clamps to the window edge and the galvo covers the residual, so the array lands this far off the
+# field center (still at its true wafer location). Feasible only while that field offset stays <=
+# this tol, keeping arrays near center. Matches clamp_center / the align-mark handling. (v2's
+# top/bottom rows land ~0.4 mm out -- well inside 2.5 mm.)
+ARRAY_FIELD_TOL_UM = 2500.0
 
 # Candidate rotations, ordered so ties resolve to the SMALLEST rotation: 0 first
 # (no needless flip), then 90 before 270. A design that must rotate to fit still
@@ -188,46 +198,6 @@ def _cluster_box(cluster: list) -> ArrayBox:
     )
 
 
-def group_rows(boxes, row_tol_um: float = None) -> list[Row]:
-    """Bucket ArrayBoxes into y-bands, order rows top->bottom, arrays left->right.
-
-    Default tolerance = 25% of the median box height. ``row_index`` 0 is the
-    highest design-y row (first physical stripe after rotation).
-    """
-    if not boxes:
-        return []
-    heights = [b.height_um for b in boxes]
-    med_h = statistics.median(heights)
-    if row_tol_um is None:
-        row_tol_um = 0.25 * med_h
-
-    ordered = sorted(boxes, key=lambda b: -b.center_um[1])
-    bands: list[list[ArrayBox]] = []
-    band_y: list[float] = []
-    for box in ordered:
-        cy = box.center_um[1]
-        placed = False
-        for i, y in enumerate(band_y):
-            if abs(cy - y) <= row_tol_um:
-                bands[i].append(box)
-                # running mean keeps the band center stable
-                band_y[i] = sum(b.center_um[1] for b in bands[i]) / len(bands[i])
-                placed = True
-                break
-        if not placed:
-            bands.append([box])
-            band_y.append(cy)
-
-    # Sort bands top->bottom by their mean y.
-    order = sorted(range(len(bands)), key=lambda i: -band_y[i])
-    rows: list[Row] = []
-    for row_index, bi in enumerate(order):
-        arrays = tuple(sorted(bands[bi], key=lambda b: b.center_um[0]))
-        y_center = sum(b.center_um[1] for b in arrays) / len(arrays)
-        rows.append(Row(row_index=row_index, y_center_um=y_center, arrays=arrays))
-    return rows
-
-
 ALIGN_TOL_UM = 25_000.0   # an alignment mark must land within +/- this of field center
 
 
@@ -262,21 +232,22 @@ def detect_align_marks(layout, align_spec) -> list:
     return boxes
 
 
-def clamp_center(exposed_center, *, travel_um=(126000, 76000), stage_y_max_um=6950):
-    """Closest reachable field-center for a target beyond the stage envelope.
+def clamp_center(exposed_center, *, reachable_um=REACHABLE_UM,
+                 ref=DEFAULT_STAGE_REF_UM, axes=DEFAULT_AXES):
+    """Closest reachable field-center for a target beyond the stage window.
 
-    Uses the fixed default mapping (DEFAULT_STAGE_REF_UM / DEFAULT_AXES). Returns
-    (eff_center_um, field_offset_um): drive the stage to center on eff_center (which
-    is inside travel + under the ceiling), and the target then lands off-center in the
-    field by field_offset = target - eff_center (so it exposes at its true location)."""
+    Uses the nominal mapping (`ref`/`axes`) and the asymmetric usable window `reachable_um`
+    (x_min, x_max, y_min, y_max). Returns (eff_center_um, field_offset_um): drive the stage to
+    center on eff_center (inside the window), and the target then lands off-center in the field
+    by field_offset = target - eff_center (so it still exposes at its true location)."""
     mx, my = exposed_center
-    rx, ry = DEFAULT_STAGE_REF_UM
-    sx, sy = DEFAULT_AXES
-    tx, ty = travel_um
+    rx, ry = ref
+    sx, sy = axes
+    x_min, x_max, y_min, y_max = reachable_um
     s_ideal_x = rx + sx * mx
     s_ideal_y = ry + sy * my
-    s_cl_x = min(max(s_ideal_x, -tx), tx)
-    s_cl_y = min(max(s_ideal_y, -ty), stage_y_max_um)
+    s_cl_x = min(max(s_ideal_x, x_min), x_max)
+    s_cl_y = min(max(s_ideal_y, y_min), y_max)
     eff_x = (s_cl_x - rx) / sx
     eff_y = (s_cl_y - ry) / sy
     return (eff_x, eff_y), (mx - eff_x, my - eff_y)
@@ -304,54 +275,64 @@ def exposed_centers(boxes, deg):
     return [rotate_point_um(b.center_um, deg) for b in boxes]
 
 
-def rotation_feasibility(boxes, deg, *, travel_um=(126000, 76000),
-                         stage_y_max_um=6950) -> dict:
-    """Extent-based stage feasibility for a k*90 design rotation (§2.1).
+def rotation_feasibility(boxes, deg, *, reachable_um=REACHABLE_UM,
+                         ref=DEFAULT_STAGE_REF_UM, axes=DEFAULT_AXES,
+                         field_tol_um=ARRAY_FIELD_TOL_UM) -> dict:
+    """Stage feasibility for a k*90 design rotation (§2.1), against the asymmetric window.
 
-    After rotation, exposure sweeps WITHIN a physical row along exposed-X (rides
-    stage-X) and ADVANCES between rows along exposed-Y (rides stage-Y). So the
-    exposed-X extent must fit stage-X travel, the exposed-Y extent must fit
-    stage-Y travel, and every array's projected stage-Y must stay at/below the
-    P3/P4 ceiling. Projection uses the default taught mapping (unverified; the
-    laser PC re-checks with the real reference).
+    Each array's rotated (exposed-frame) center is projected to an absolute stage target and
+    CLAMPED to ``reachable_um`` (clamp_center); the residual field offset (how far the array lands
+    off the field center, covered by galvo deflection) must stay within ``field_tol_um``. So an
+    array whose ideal target is up to field_tol_um outside the window is still exposable -- the same
+    clamp-and-offset the align marks / the laser PC use. Sweep/advance spans are reported so
+    choose_rotation can prefer the long extent on stage-X (the tighter -Y axis). The nominal mapping
+    is unverified; the laser PC re-checks with the real reference.
     """
     cs = exposed_centers(boxes, deg) or [(0.0, 0.0)]
     xs = [c[0] for c in cs]
     ys = [c[1] for c in cs]
     sweep_span = max(xs) - min(xs)          # along stage-X (within a row)
     advance_span = max(ys) - min(ys)        # along stage-Y (between rows)
-    ref_y = DEFAULT_STAGE_REF_UM[1]
-    sy = DEFAULT_AXES[1]
-    stage_ys = [ref_y + sy * y for y in ys]
-    max_sy, min_sy = max(stage_ys), min(stage_ys)
-    tx, ty = travel_um
-    feasible = (sweep_span <= tx and advance_span <= ty
-                and max_sy <= stage_y_max_um and min_sy >= -ty)
+    rx, ry = ref
+    sx, sy = axes
+    stage = [(rx + sx * x, ry + sy * y) for x, y in cs]   # ideal (unclamped) targets, for reporting
+    stage_xs = [p[0] for p in stage]
+    stage_ys = [p[1] for p in stage]
+    offs = [clamp_center(c, reachable_um=reachable_um, ref=ref, axes=axes)[1] for c in cs]
+    max_off = max((max(abs(o[0]), abs(o[1])) for o in offs), default=0.0)
+    feasible = max_off <= field_tol_um
     return {
         "deg": int(deg) % 360,
         "feasible": bool(feasible),
         "sweep_span_um": float(sweep_span),
         "row_advance_span_um": float(advance_span),
-        "max_stage_y_um": float(max_sy),
+        "max_field_offset_um": float(max_off),
+        "field_tol_um": float(field_tol_um),
+        "max_stage_y_um": float(max(stage_ys)),
+        "min_stage_y_um": float(min(stage_ys)),
+        "max_stage_x_um": float(max(stage_xs)),
+        "min_stage_x_um": float(min(stage_xs)),
         "sweep_axis": "stage_x",
         "row_advance_axis": "stage_y",
         "long_on_x": bool(sweep_span >= advance_span),
     }
 
 
-def choose_rotation(boxes, *, travel_um=(126000, 76000), stage_y_max_um=6950) -> dict:
+def choose_rotation(boxes, *, reachable_um=REACHABLE_UM,
+                    ref=DEFAULT_STAGE_REF_UM, axes=DEFAULT_AXES,
+                    field_tol_um=ARRAY_FIELD_TOL_UM) -> dict:
     """Pick a k*90 design rotation (§2.1).
 
-    Prefer a stage-feasible rotation that puts the longer array-extent on stage-X
-    (so the short extent rides the ceiling-limited stage-Y). Deterministic; ties
-    resolve to the smallest rotation (candidate order 0, 90, 180, 270), so a design
-    already at the right orientation stays at 0.
+    Prefer a stage-feasible rotation (every array's clamped field offset within field_tol_um)
+    that puts the longer array-extent on stage-X (so the short extent rides the tighter -Y axis).
+    Deterministic; ties resolve to the smallest rotation (candidate order 0, 90, 180, 270), so a
+    design already at the right orientation stays at 0.
     Returns a ``rotation_feasibility`` dict for the chosen degree.
     """
     best = None
     for deg in _ROTATION_CANDIDATES:
-        f = rotation_feasibility(boxes, deg, travel_um=travel_um,
-                                 stage_y_max_um=stage_y_max_um)
+        f = rotation_feasibility(boxes, deg, reachable_um=reachable_um, ref=ref, axes=axes,
+                                 field_tol_um=field_tol_um)
         score = (1 if f["feasible"] else 0, 1 if f["long_on_x"] else 0)
         if best is None or score > best[0]:
             best = (score, f)

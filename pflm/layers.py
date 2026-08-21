@@ -3,7 +3,7 @@
 Adapted from the Singulation project:
   - ``slicing/run_splitter.py::inspect_layers`` / ``LayerInfo``
   - ``slicing/split_klayout.py`` selector helpers
-    (``parse_layer_spec`` / ``layer_matches`` / ``describe_layer_spec``)
+    (``parse_layer_spec`` / ``layer_matches``)
 
 Load GDS via ``pya.Layout().read(path)``; DXF via ``LoadLayoutOptions().dxf_unit``.
 No hardware imports.
@@ -133,15 +133,6 @@ def parse_layer_spec(spec) -> tuple:
         return int(text), 0, None
     except ValueError:
         return None, None, text
-
-
-def describe_layer_spec(spec) -> str:
-    layer, datatype, name = spec
-    if name is not None:
-        return f"name {name!r}"
-    if layer is None:
-        return f"default ({SOURCE_LAYER}/{SOURCE_DATATYPE} or a layer named '{SOURCE_LAYER}')"
-    return f"{layer}/{datatype}"
 
 
 def layer_matches(info, spec) -> bool:

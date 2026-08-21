@@ -51,23 +51,36 @@ DEFAULT_PORT = "COM5"
 BAUD = 9600
 CR = b"\r"
 MOVE_TIMEOUT_S = 120.0   # generous: the stage is slow, and a full-travel move must not time out
+RIS_TIMEOUT_S = 180.0    # RIS drives full-travel to the hard limits and back -- allow extra
 POLL_S = 0.05
 STATION_KEYS = ("P1", "P2", "P3", "P4")
 
-# ES111 stage travel (from the controller's STAGE report: X = 126 mm, Y = 76 mm).
-# Coarse software soft-limit: any target whose |x| or |y| exceeds the travel is a
-# typo/runaway and is refused before it reaches the controller. The hardware limit
-# switches remain the physical backstop.
-TRAVEL_X_UM = 126_000
-TRAVEL_Y_UM = 76_000
+# ES111 stage travel is 126 mm x 76 mm, but after the 2026-08 re-datum the usable coordinate
+# frame is ASYMMETRIC: X runs positive (bottom corner 16236 up to the top-right hard stop
+# 143529); Y runs negative from 0 down to a -38140 FLOOR -- NOT the -57210 hard stop: the
+# stage hits a PIPE at the back past -38140, so the guard stops there (protects the hardware,
+# improves alignment). The coarse guard refuses a target outside this envelope before it
+# reaches the controller; the calibration reachable_um shares the same -Y floor, and the
+# hardware limit switches are the +X/+Y backstop. (The old symmetric +/-126000 x +/-76000
+# guard wrongly rejected valid +X targets past 126000 um in the new frame.)
+STAGE_X_MIN_UM, STAGE_X_MAX_UM = 0, 145_000
+STAGE_Y_MIN_UM, STAGE_Y_MAX_UM = -38_140, 1_000
 # After a move, PS must land within this of the target or we raise -- a micron-level
 # placement gate before anything (e.g. a laser mark) trusts the position. The stage
 # reports whole-micron position and lands on the commanded coordinate, so this is
 # tight on purpose. If a good move ever trips it, the error prints the actual offset
 # -- loosen only to what the stage genuinely repeats.
-POSITION_TOLERANCE_UM = 3
+POSITION_TOLERANCE_UM = 1
 # Ceiling for the interactive jog step, well under full travel.
 MAX_JOG_STEP_UM = 20_000
+
+# Motion profile applied on every connect (hardcoded per request; Prior OptiScan III SMS/SAS
+# commands): SMS = stage X/Y max speed (range 1-100), SAS = stage acceleration (range 4-100).
+# SMS 75 = 75% of max ("750" rescaled from the ProScan 1-1000 range to the OptiScan's 1-100);
+# SAS 52 = middle of 4-100. Gentler than full speed -- the stage runs healthier here. The
+# OptiScan III has NO S-curve (SCS) command, so jerk is not separately tunable. Each command is
+# best-effort with a read-back on connect: a rejected/out-of-range value is warned, never fatal.
+MOTION_PROFILE = (("SMS", 75), ("SAS", 52))
 
 
 # --------------------------------------------------------------------------- serial
@@ -220,6 +233,7 @@ class OptiScan:
                 "No reply from %s. Check the COM number (Device Manager > Ports), that "
                 "the WinLase/Prior software isn't holding the port, and the cable." % port)
         self.identity = who
+        self.apply_motion_profile()   # gentle SMS/SAS on connect (best-effort), like singulation
 
     def command(self, cmd: str, multiline: bool = False, expect: str = None) -> str:
         """Send one command and return the reply.
@@ -306,11 +320,13 @@ class OptiScan:
             raise
 
     def _check_target(self, x: float, y: float) -> None:
-        """Refuse a stage target outside the travel envelope (a typo/runaway)."""
-        if abs(x) > TRAVEL_X_UM or abs(y) > TRAVEL_Y_UM:
+        """Refuse a stage target outside the physical coordinate envelope (a typo/runaway)."""
+        if not (STAGE_X_MIN_UM <= x <= STAGE_X_MAX_UM
+                and STAGE_Y_MIN_UM <= y <= STAGE_Y_MAX_UM):
             raise ValueError(
-                "target X=%d Y=%d um is outside the +/-%d x +/-%d um travel; refusing to move"
-                % (int(x), int(y), TRAVEL_X_UM, TRAVEL_Y_UM))
+                "target X=%d Y=%d um is outside the stage envelope X[%d,%d] Y[%d,%d]; "
+                "refusing to move" % (int(x), int(y), STAGE_X_MIN_UM, STAGE_X_MAX_UM,
+                                      STAGE_Y_MIN_UM, STAGE_Y_MAX_UM))
 
     def _verify_at(self, x: float, y: float, tol_um: int = POSITION_TOLERANCE_UM) -> None:
         """Confirm PS landed on the target; catches a silently rejected move."""
@@ -332,6 +348,40 @@ class OptiScan:
         self.command("GZ,%d" % int(z), expect="R")
         if wait:
             self.wait_idle()
+
+    def redatum(self):
+        """Re-establish the absolute datum by restoring the index (RIS): the controller
+        drives to the +X/+Y hard limits, re-zeroes there, and returns. Call before a move so
+        an open-loop run cannot accumulate drift -- each placement then starts from a freshly
+        referenced frame.
+
+        RIS drives the stage over its FULL travel to the hard limits, so the whole path must
+        be clear (same collision caveat as the ``index`` CLI command). Blocks until the index
+        move finishes; returns the reported (x, y). This is only as accurate as the stage's
+        limit-switch REPEATABILITY -- RIS/SIS both lean on those switches, so if they do not
+        repeat this does not help. Qualify that repeatability before trusting it for placement."""
+        self.command("RIS")                       # controller drives to limits, re-zeroes, returns
+        self.wait_idle(timeout_s=RIS_TIMEOUT_S)
+        return self.stage_position()
+
+    def apply_motion_profile(self, profile=MOTION_PROFILE) -> None:
+        """Set the stage speed / accel / S-curve on connect (Prior SMS/SAS/SCS commands).
+        Best-effort per command: one the controller rejects (e.g. an OptiScan-class unit has
+        no SCS and a narrower range) is warned about, never fatal, so a good handshake can't
+        die here. Each value is read back and printed so the real applied profile is visible."""
+        applied = []
+        for name, val in profile:
+            try:
+                self.command("%s,%d" % (name, val))
+            except RuntimeError as exc:
+                print("[motion] %s,%d rejected (%s) -- left unchanged" % (name, val, exc))
+                continue
+            try:
+                applied.append("%s=%s" % (name, self.command(name).split(",")[0].strip()))
+            except RuntimeError:
+                applied.append("%s(set; read-back failed)" % name)
+        if applied:
+            print("[motion] applied " + ", ".join(applied))
 
     def move_rel(self, dx: int, dy: int, wait: bool = True) -> None:
         cx, cy = self.stage_position()

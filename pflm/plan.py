@@ -28,6 +28,8 @@ except ImportError:
 from . import schema_version
 from .arrays import (
     ALIGN_TOL_UM,
+    ARRAY_FIELD_TOL_UM,
+    REACHABLE_UM,
     choose_rotation,
     clamp_center,
     count_pinfins_in,
@@ -47,7 +49,6 @@ from .centering import (
     clip_and_center,
     dead_space_rects_um,
     fits_field,
-    region_bbox_um,
 )
 from .dxf_writer import write_circles_r2010, write_dxf_r2010, write_rects_r2010
 
@@ -64,13 +65,19 @@ QUALIFIED_FIELD_UM = 54_000
 FULL_FIELD_UM = 78_485
 WAFER_DIAMETER_MM = 100.0
 WAFER_RADIUS_UM = 50_000
-TRAVEL_UM = (126_000, 76_000)
-STAGE_Y_MAX_UM = 6_950
-# Singulation's baked-in slicer global offset (split_klayout.py), retained by
-# request as the prep default. Field-frame nudge applied AFTER rotation/centering.
-# UNVERIFIED for this rig — re-measure; keep the laser-PC exposure_calibration
-# global_offset at 0 to avoid double-correction (§8).
-GLOBAL_OFFSET_UM = (-3447.0, 460.0)
+# Feasibility uses the ASYMMETRIC usable stage window arrays.REACHABLE_UM (X[16236,138529]
+# Y[-38140,0]; a pipe caps -Y at -38140), matching the laser-PC calibration. The prep projects
+# each array center to an absolute stage target and requires it inside this box -- the same check
+# transform.is_reachable runs. Still a NOMINAL pre-check; the laser PC re-checks with the real
+# taught reference at run time (laser_pc/optiscan.py + transform).
+# Baked DXF placement offset (field-frame, applied AFTER rotation/centering). RESET TO 0
+# 2026-08-20: the coarse/hardware placement now lives in the TAUGHT reference + stations (the
+# dialed-in nest, mirroring singulation), so the old back-side -3447/+460 value is retired.
+# This is the knob for FUTURE small alignment corrections -- and it's safe here because each
+# array is centered in its own field, so a sub-mm nudge stays well inside the galvo (unlike the
+# full-field dicing tiles). Keep the laser-PC exposure_calibration global_offset at 0 too, so the
+# correction is baked once, in the DXF, not double-applied.
+GLOBAL_OFFSET_UM = (0.0, 0.0)
 
 
 def array_id(row_index: int, col_index: int) -> str:
@@ -135,7 +142,7 @@ def _clear_existing_dxf(jobs_dir: Path) -> None:
 
 def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
               backside=True, rotation_deg="auto", within_row_stride=2,
-              travel_um=TRAVEL_UM, stage_y_max_um=STAGE_Y_MAX_UM,
+              reachable_um=REACHABLE_UM,
               global_offset_um=GLOBAL_OFFSET_UM, row_tol_um=None,
               params_csv=None, pin_mode="polygon", expose_align=True,
               align_tol_um=ALIGN_TOL_UM, ablate_dead_space=False, cell="4/0",
@@ -192,14 +199,12 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
 
     # ---- rotation choice (extent-based, to fit the stage) (§2.1) -------------
     if isinstance(rotation_deg, str) and rotation_deg.strip().lower() == "auto":
-        chosen = choose_rotation(boxes, travel_um=tuple(travel_um),
-                                 stage_y_max_um=stage_y_max_um)
+        chosen = choose_rotation(boxes, reachable_um=reachable_um)
         deg = int(chosen["deg"])
         note(f"design_rotation_deg = auto -> {deg} (feasible={chosen['feasible']})")
     else:
         deg = int(rotation_deg) % 360
-        chosen = rotation_feasibility(boxes, deg, travel_um=tuple(travel_um),
-                                      stage_y_max_um=stage_y_max_um)
+        chosen = rotation_feasibility(boxes, deg, reachable_um=reachable_um)
         note(f"design_rotation_deg = {deg} (explicit; feasible={chosen['feasible']})")
 
     # ---- group into PHYSICAL rows in the EXPOSED frame (never mix rows, §2.2)-
@@ -207,21 +212,32 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
     note(f"Grouped {len(boxes)} arrays into {len(rows)} physical row(s) "
          f"(exposed-Y bands, top->bottom); sizes = {[len(r.arrays) for r in rows]}")
 
+    x_min, x_max, y_min, y_max = reachable_um
     stage = {
-        "travel_um": [int(travel_um[0]), int(travel_um[1])],
-        "stage_y_max_um": int(stage_y_max_um),
+        "reachable_um": {"x_min": int(x_min), "x_max": int(x_max),
+                         "y_min": int(y_min), "y_max": int(y_max)},
         "sweep_axis": chosen["sweep_axis"],            # within a row (stage-X)
         "row_advance_axis": chosen["row_advance_axis"],  # between rows (stage-Y)
         "sweep_span_um": round(chosen["sweep_span_um"], 3),
         "row_advance_span_um": round(chosen["row_advance_span_um"], 3),
         "max_stage_y_um": round(chosen["max_stage_y_um"], 3),
+        "min_stage_y_um": round(chosen["min_stage_y_um"], 3),
+        "max_stage_x_um": round(chosen["max_stage_x_um"], 3),
+        "min_stage_x_um": round(chosen["min_stage_x_um"], 3),
+        "max_field_offset_um": round(chosen["max_field_offset_um"], 3),
+        "field_tol_um": round(chosen["field_tol_um"], 3),
         "feasible": bool(chosen["feasible"]),
-        "notes": ("within-row sweep rides stage-X; rows advance along stage-Y "
-                  f"(kept at/below the +{stage_y_max_um} um ceiling)"),
+        "notes": ("within-row sweep rides stage-X; rows advance along stage-Y. Each array's stage "
+                  f"center is clamped into the window X[{int(x_min)},{int(x_max)}] "
+                  f"Y[{int(y_min)},{int(y_max)}] um (pipe floor {int(y_min)}); the residual (<= "
+                  f"{int(chosen['field_tol_um'])} um) is a baked galvo field offset, so each array "
+                  "still exposes at its true location."),
     }
     if not stage["feasible"]:
-        warn("stage.feasible=false — rotated spans do not fit travel/ceiling; "
-             "the laser-PC pre-flight will refuse to run this set")
+        warn(f"stage.feasible=false — an array center is > {int(chosen['field_tol_um'])} um outside "
+             f"the usable window (X[{int(x_min)},{int(x_max)}] Y[{int(y_min)},{int(y_max)}] um, pipe "
+             f"floor {int(y_min)}); max field offset {int(chosen['max_field_offset_um'])} um. The "
+             "laser-PC pre-flight will refuse it -- tighten the layout or re-center.")
 
     # ---- per-array centering + DXF -------------------------------------------
     total_pinfins_in_boxes = 0
@@ -232,33 +248,44 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
         for col_index, box in enumerate(row.arrays):
             aid = array_id(row.row_index, col_index)
             job_rel = f"jobs/{aid}.dxf"
+            # Clamp this array's stage center into the usable window; the residual is a field
+            # offset (galvo deflection) baked into the DXF via center_override, so the array still
+            # exposes at its TRUE location while the stage stays in-window (same as the align marks).
+            exposed_raw = rotate_point_um(box.center_um, deg)
+            eff, off = clamp_center(exposed_raw, reachable_um=reachable_um)
+            off_mag = max(abs(off[0]), abs(off[1]))
+            within_tol = off_mag <= ARRAY_FIELD_TOL_UM
             if pin_mode == "circle":
                 # efficient: round pins -> CIRCLE entities (dense arrays; §perf)
                 circles, cbb = array_circles(
-                    layout, pinfin, box.bbox_um,
-                    design_rotation_deg=deg, global_offset_um=tuple(global_offset_um))
+                    layout, pinfin, box.bbox_um, design_rotation_deg=deg,
+                    global_offset_um=tuple(global_offset_um), center_override=eff)
                 count = len(circles)
                 write_circles_r2010(jobs_dir / f"{aid}.dxf", circles)
-                fits = (cbb is None) or (max(abs(cbb[0]), abs(cbb[1]),
-                                             abs(cbb[2]), abs(cbb[3])) <= USABLE_FIELD_HALF_UM)
+                fits_fld = (cbb is None) or (max(abs(cbb[0]), abs(cbb[1]),
+                                                 abs(cbb[2]), abs(cbb[3])) <= USABLE_FIELD_HALF_UM)
             else:
                 count = count_pinfins_in(layout, pinfin, box.bbox_um)
                 region = clip_and_center(
-                    layout, pinfin, box.bbox_um,
-                    design_rotation_deg=deg, global_offset_um=tuple(global_offset_um))
+                    layout, pinfin, box.bbox_um, design_rotation_deg=deg,
+                    global_offset_um=tuple(global_offset_um), center_override=eff)
                 write_dxf_r2010(jobs_dir / f"{aid}.dxf", region, dbu)
-                fits = fits_field(region, USABLE_FIELD_HALF_UM, dbu=dbu)
+                fits_fld = fits_field(region, USABLE_FIELD_HALF_UM, dbu=dbu)
             total_pinfins_in_boxes += count
             has_geom = count > 0
+            fits = bool(fits_fld and within_tol)
 
             bbox_center = [round(box.center_um[0], 3), round(box.center_um[1], 3)]
-            exposed_center = list(rotate_point_um(box.center_um, deg))
-            exposed_center = [round(exposed_center[0], 3), round(exposed_center[1], 3)]
+            exposed_center = [round(eff[0], 3), round(eff[1], 3)]     # clamped stage center (drive-to)
+            field_offset = [round(off[0], 3), round(off[1], 3)]       # galvo offset from field center
 
             if not has_geom:
                 warn(f"{aid}: bbox has no pinfin shapes (has_geometry=false) — "
                      "a placed empty job looks identical to a real one at the machine")
-            if not fits:
+            if not within_tol:
+                warn(f"{aid}: array center lands {off_mag/1000:.2f} mm off field center "
+                     f"(> {ARRAY_FIELD_TOL_UM/1000:.1f} mm tol) — stage cannot reach it")
+            elif not fits_fld:
                 warn(f"{aid}: centered geometry exceeds +/-{USABLE_FIELD_HALF_UM} um "
                      "usable field (fits_field=false)")
 
@@ -268,6 +295,7 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
                 "col_index": col_index,
                 "bbox_center_um": bbox_center,
                 "exposed_center_um": exposed_center,
+                "field_offset_um": field_offset,
                 "bbox_um": [round(v, 3) for v in box.bbox_um],
                 "polygon_count": count,
                 "has_geometry": has_geom,
@@ -275,7 +303,8 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
                 "job_dxf": job_rel,
             }
             if etch is not None:
-                key, dist = _nearest_param(etch, exposed_center[0], exposed_center[1])
+                # Match etch params by the array's TRUE exposed location, not the clamped center.
+                key, dist = _nearest_param(etch, exposed_raw[0], exposed_raw[1])
                 if key is not None and dist <= 1000.0:
                     p = etch[key]
                     rec["type"] = p["type"]
@@ -394,8 +423,7 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
             for mi, mb in enumerate(marks):
                 aid = "align%02d" % mi
                 exposed_mark = rotate_point_um(mb.center_um, deg)
-                eff, off = clamp_center(exposed_mark, travel_um=tuple(travel_um),
-                                        stage_y_max_um=stage_y_max_um)
+                eff, off = clamp_center(exposed_mark, reachable_um=reachable_um)
                 region = clip_and_center(layout, align, mb.bbox_um, design_rotation_deg=deg,
                                          global_offset_um=tuple(global_offset_um),
                                          center_override=eff)

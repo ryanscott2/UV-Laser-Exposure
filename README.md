@@ -15,7 +15,7 @@ the wafer so each target sits under the beam.
 
 | Half | Where | Python | Deps | Does |
 |---|---|---|---|---|
-| **Prep** (`pflm/`, `prep_app/`) | design PC (online) | 3.11+ | klayout, ezdxf, PySide6 | Load GDS → pick pinfin/bbox/align layers → detect the 14 arrays, group into rows, order top→bottom → write a **set folder** (`plan.json` + one centered DXF per array + manifest). PySide6/QML preview app. |
+| **Prep** (`pflm/`, `prep_app/`) | design PC (online) | 3.11+ | klayout, ezdxf, PySide6 | Load GDS → pick pinfin/bbox/align layers → detect the arrays (10 in the v2 layout), group into rows, order top→bottom → write a **set folder** (`plan.json` + one centered DXF per array + manifest). PySide6/QML preview app. |
 | **Run** (`laser_pc/`) | offline laser PC | 3.8 | pyserial, pywin32 (local wheels) | Teach one stage reference, build one WinLase `.wlj` per array, then step the stage row-by-row (top→bottom) marking each centered array, pausing between rows so you can mask. Tkinter launcher. SIMULATE by default; `--arm` fires. |
 
 The two halves meet at a **set folder** under `output/sets/<name>/`. See
@@ -39,8 +39,10 @@ python prep_app/prep_app.py
 - **Prep half** — verifiable offline against a real GDS; this is the primary deliverable.
 - **Laser-PC half** — adapted from Singulation's vetted `optiscan.py` / `winlase_build_jobs.py` /
   `dice_wafer.py`. The serial + WinLase-COM paths **cannot be tested off the machine** and
-  require on-hardware bring-up (calibration, axis signs, the backside mirror). Treat all
-  calibration numbers as un-verified until re-measured on this rig.
+  require on-hardware bring-up. The stage calibration is now **ported from the dialed-in
+  Singulation setup and confirmed definitive** — refine it with a tiny DXF `global_offset`, not
+  by re-teaching. The genuine remaining caveat: the **WinLase-COM and serial paths are still
+  un-verified off the machine.**
 
 > ⚠️ Laser safety: exposure runs default to SIMULATE. Arming requires `--arm` plus a typed
 > confirmation and a countdown. The UI STOP is a *controlled* stop between rows/passes — the

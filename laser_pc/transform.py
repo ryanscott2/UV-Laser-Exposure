@@ -130,6 +130,39 @@ class Calibration:
 
         self.stage_y_max_um = float(data.get("stage_y_max_um", STAGE_Y_MAX_UM))
 
+        # Optional EXPLICIT reachable window (absolute stage um). Use this when the usable
+        # travel is not symmetric about 0 -- e.g. a re-datumed rig whose left/right hard
+        # stops and Y stops don't straddle the origin. When present it OVERRIDES the
+        # |x|<=travel_x / -travel_y<=y<=stage_y_max model in check_reachable/stage_targets.
+        # Keys: x_min, x_max, y_min, y_max (any omitted key falls back to the old model bound).
+        r = data.get("reachable_um")
+        if isinstance(r, dict):
+            self.reachable = SimpleNamespace(
+                x_min=float(r.get("x_min", -self.travel_um[0])),
+                x_max=float(r.get("x_max", self.travel_um[0])),
+                y_min=float(r.get("y_min", -self.travel_um[1])),
+                y_max=float(r.get("y_max", self.stage_y_max_um)),
+            )
+        else:
+            self.reachable = None
+
+    def is_reachable(self, sx, sy) -> bool:
+        """True if absolute stage target (sx, sy) um is inside the usable travel. Uses the
+        explicit reachable window if the calibration defines one, else the legacy symmetric
+        model (|x|<=travel_x and -travel_y<=y<=stage_y_max_um)."""
+        r = self.reachable
+        if r is not None:
+            return r.x_min <= sx <= r.x_max and r.y_min <= sy <= r.y_max
+        return (abs(sx) <= self.travel_um[0]
+                and -self.travel_um[1] <= sy <= self.stage_y_max_um)
+
+    def reach_bounds(self):
+        """(x_min, x_max, y_min, y_max) of the usable window, for display/logging."""
+        r = self.reachable
+        if r is not None:
+            return (r.x_min, r.x_max, r.y_min, r.y_max)
+        return (-self.travel_um[0], self.travel_um[0], -self.travel_um[1], self.stage_y_max_um)
+
     def to_dict(self) -> dict:
         return {
             "units": self.units,
@@ -149,6 +182,10 @@ class Calibration:
             },
             "travel_um": [self.travel_um[0], self.travel_um[1]],
             "stage_y_max_um": self.stage_y_max_um,
+            **({"reachable_um": {
+                "x_min": self.reachable.x_min, "x_max": self.reachable.x_max,
+                "y_min": self.reachable.y_min, "y_max": self.reachable.y_max,
+            }} if self.reachable is not None else {}),
         }
 
     def nudge_for(self, array_id):
@@ -232,11 +269,6 @@ def check_reachable(plan: dict, cal: Calibration):
     ``(ok, failures)`` where ``failures`` is the list of offending ``array_id`` strings
     (empty when ``ok`` is True). Called by the laser-PC pre-flight (section 7.3).
     """
-    travel_x = cal.travel_um[0]
-    travel_y = cal.travel_um[1]
-    y_ceiling = cal.stage_y_max_um
-    y_floor = -travel_y
-
     failures = []
     for arr in _iter_arrays(plan):
         array_id = arr.get("array_id")
@@ -245,7 +277,7 @@ def check_reachable(plan: dict, cal: Calibration):
             failures.append(array_id)
             continue
         sx, sy = wafer_to_stage(exposed, cal, array_id)
-        if abs(sx) > travel_x or sy < y_floor or sy > y_ceiling:
+        if not cal.is_reachable(sx, sy):
             failures.append(array_id)
 
     return (len(failures) == 0, failures)
@@ -253,10 +285,6 @@ def check_reachable(plan: dict, cal: Calibration):
 
 def stage_targets(plan: dict, cal: Calibration):
     """List of ``(array_id, stage_x, stage_y, reachable)`` for every array (for `--list`)."""
-    travel_x = cal.travel_um[0]
-    travel_y = cal.travel_um[1]
-    y_ceiling = cal.stage_y_max_um
-    y_floor = -travel_y
     out = []
     for arr in _iter_arrays(plan):
         array_id = arr.get("array_id")
@@ -265,8 +293,7 @@ def stage_targets(plan: dict, cal: Calibration):
             out.append((array_id, None, None, False))
             continue
         sx, sy = wafer_to_stage(exposed, cal, array_id)
-        ok = (abs(sx) <= travel_x) and (y_floor <= sy <= y_ceiling)
-        out.append((array_id, sx, sy, ok))
+        out.append((array_id, sx, sy, cal.is_reachable(sx, sy)))
     return out
 
 
@@ -509,24 +536,34 @@ def teach_reference(optiscan, cal=None, wafer_um=(0.0, 0.0), out_path=None, step
 
 # --------------------------------------------------------------------------- self-test
 def _known_array_centers_um():
-    """The 14 PFLM array centers in the design frame (section 1 / 2.1 / 4.1).
+    """The 10 PFLM v2 array centers in the EXPOSED frame (design/build_wafer_v2.py).
 
-    8 rows (1,2,2,2,2,2,2,1), 10.5 mm pitch, top row y = +36862 um; two-wide rows have
-    centers at x = +/-19350 um; single-array rows at x = 0.
+    v2 is a 10-cell STAGGERED layout (top 3 / middle 4 / bottom 3), cells 10.5 x 38.7 mm,
+    authored directly in the exposed frame (NO +90 bake). Column pitch = cell_w + kerf
+    (10500 + 200 um); top/bottom row centers at y = +/-(cell_h/2 + kerf/2) = +/-19450 um.
+    Returns [(row_index, col_index, (x_um, y_um)), ...] with row 0 = top, 1 = middle, 2 = bottom.
     """
-    top_y = 36862.0
-    pitch = 10500.0
-    half_x = 19350.0
-    counts = [1, 2, 2, 2, 2, 2, 2, 1]
+    col_pitch = 10500.0 + 200.0          # cell width + kerf
+    row_off = 38700.0 / 2.0 + 200.0 / 2.0  # cell height/2 + kerf/2 = 19450 um
+    row_kx = {0: [-2, 0, 2], 1: [-3, -1, 1, 3], 2: [-2, 0, 2]}
+    row_y = {0: +row_off, 1: 0.0, 2: -row_off}
     centers = []
-    for row_index, cnt in enumerate(counts):
-        y = top_y - row_index * pitch
-        if cnt == 1:
-            centers.append((row_index, 0, (0.0, y)))
-        else:
-            centers.append((row_index, 0, (-half_x, y)))
-            centers.append((row_index, 1, (half_x, y)))
+    for ri in (0, 1, 2):
+        for ci, kx in enumerate(row_kx[ri]):
+            centers.append((ri, ci, (kx * col_pitch, row_y[ri])))
     return centers
+
+
+def _definitive_cal():
+    """The ported/confirmed exposure calibration (for the self-test): taught reference
+    (84355, -19056), backside X-mirror, and the asymmetric pipe-limited reachable window."""
+    return Calibration({
+        "units": "microns",
+        "reference": {"wafer_um": [0.0, 0.0], "stage_um": {"x": 84355.0, "y": -19056.0, "z": 0}},
+        "axes": {"sx": 1, "sy": 1}, "mirror": {"x": True, "y": False},
+        "global_offset_um": [0.0, 0.0], "per_array_offset_um": {},
+        "reachable_um": {"x_min": 16236.0, "x_max": 138529.0, "y_min": -38140.0, "y_max": 0.0},
+    })
 
 
 def _rotate90(pt):
@@ -566,39 +603,36 @@ def _selftest() -> int:
     print("     wafer_to_stage((0,0))          = (%.1f, %.1f)" % wafer_to_stage((0.0, 0.0), cal))
     print("     wafer_to_stage((1000,2000))    = (%.1f, %.1f)" % wafer_to_stage((1000.0, 2000.0), cal))
 
-    # --- 1. +90 rotation: all 14 arrays reachable, max stage_Y ~ +900 --------------
+    # --- 1. v2 layout vs the DEFINITIVE asymmetric reachable window -----------------
+    # v2 is authored in the exposed frame (no +90 bake). Against the pipe-limited window its
+    # top/bottom row centers overflow by ~400 um (v2 is ~0.4 mm too tall on each side).
+    dcal = _definitive_cal()
     centers = _known_array_centers_um()
-    plan_rot = _make_plan_from_centers(centers, rotate=True)
-    ok, failures = check_reachable(plan_rot, cal)
-    assert ok, "expected all reachable after +90 rotation, failures=%r" % (failures,)
-    tgts = stage_targets(plan_rot, cal)
+    plan_v2 = _make_plan_from_centers(centers, rotate=False)
+    ok, failures = check_reachable(plan_v2, dcal)
+    tgts = stage_targets(plan_v2, dcal)
     max_sy = max(t[2] for t in tgts)
     min_sy = min(t[2] for t in tgts)
-    max_abs_sx = max(abs(t[1]) for t in tgts)
-    assert abs(max_sy - 900.0) < 1e-6, "max stage_Y should be ~+900, got %r" % max_sy
-    assert max_sy <= cal.stage_y_max_um, (max_sy, cal.stage_y_max_um)
-    print("\n[ok] +90 design rotation: check_reachable == ok for all %d arrays" % len(tgts))
-    print("     max stage_Y = %+.1f um  (<= ceiling %+.0f)   min stage_Y = %+.1f um"
-          % (max_sy, cal.stage_y_max_um, min_sy))
-    print("     max |stage_X| = %.1f um  (<= travel_x %.0f)" % (max_abs_sx, cal.travel_um[0]))
+    _rx0, _rx1, _ry0, _ry1 = dcal.reach_bounds()
+    assert not ok, "v2 top/bottom rows should fall OUTSIDE the pipe-limited window"
+    assert max_sy > _ry1 and min_sy < _ry0, (min_sy, max_sy, _ry0, _ry1)
+    assert len(failures) == 6, ("expected top+bottom (6 arrays) unreachable", failures)
+    print("\n[ok] v2 (10-cell, exposed frame) vs window X[%.0f,%.0f] Y[%.0f,%.0f]:"
+          % (_rx0, _rx1, _ry0, _ry1))
+    print("     stage_Y span [%+.0f, %+.0f] um -> %d/%d array centers OUTSIDE (top/bottom overflow "
+          "the %+.0f pipe floor / %+.0f front limit by ~%.0f um)"
+          % (min_sy, max_sy, len(failures), len(tgts), _ry0, _ry1,
+             max(max_sy - _ry1, _ry0 - min_sy)))
+    print("     -> the PREP clamps each center into the window and bakes the ~%.0f um residual as a "
+          "galvo field offset (<= the 2.5 mm array tolerance), so v2 still exposes at true locations."
+          % max(max_sy - _ry1, _ry0 - min_sy))
 
-    # --- 2. UNROTATED top-row center fails the ceiling ------------------------------
-    top_center = None
-    for _ri, _ci, c in centers:
-        if abs(c[1] - 36862.0) < 1e-9 and abs(c[0]) < 1e-9:
-            top_center = c
-            break
-    assert top_center is not None
-    plan_flat = {"rows": [{"row_index": 0, "arrays": [
-        {"array_id": "r00c00", "exposed_center_um": [top_center[0], top_center[1]]}]}]}
-    ok_flat, fail_flat = check_reachable(plan_flat, cal)
-    sx_f, sy_f = wafer_to_stage(top_center, cal, "r00c00")
-    assert not ok_flat, "unrotated top row must be UNreachable"
-    assert "r00c00" in fail_flat, fail_flat
-    assert sy_f > cal.stage_y_max_um, (sy_f, cal.stage_y_max_um)
-    print("\n[ok] UNROTATED top-row center (wafer_Y=+36862) FAILS the ceiling")
-    print("     stage_Y = %+.1f um  >  ceiling %+.0f um  -> refused (%r)"
-          % (sy_f, cal.stage_y_max_um, fail_flat))
+    # --- 2. the v2 MIDDLE row alone is fully reachable ------------------------------
+    mid = [c for c in centers if c[0] == 1]
+    plan_mid = _make_plan_from_centers(mid, rotate=False)
+    ok_mid, fail_mid = check_reachable(plan_mid, dcal)
+    assert ok_mid, ("v2 middle row should be reachable", fail_mid)
+    print("\n[ok] v2 middle row (%d arrays) is fully inside the window" % len(mid))
 
     # --- 3. solve_transform round-trip on synthetic pairs ---------------------------
     exposed_pts = [(0.0, 0.0), (10000.0, 0.0), (0.0, 10000.0),

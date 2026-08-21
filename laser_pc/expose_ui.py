@@ -16,15 +16,24 @@ What is different from dicing (see docs/ARCHITECTURE.md):
     the operator MASK a completed row/phase before the next exposure (ARCHITECTURE 2.2).
     This UI watches stdout for those pauses and pops a modal; clicking Resume writes the
     ``--resume-flag`` file the run loop is waiting on, mirroring the ``--stop-flag`` pattern.
+    The modal is NOT closed on the click -- it stays up (button -> "Resuming...") and closes
+    only once the run confirms the resume by actually starting the next mark (WinLase
+    ``[mark] started`` armed, or ``SIMULATE mark`` in a dry run). So an open window always
+    means "not marking yet."
 
 STOP is a CONTROLLED stop -- it writes the stop flag and the run loop stops cleanly between
 arrays / at the next mask pause. It is NOT an emergency stop; use the hardware e-stop for
 that.
 
 Progress / mask parsing contract (what this UI keys off in expose_wafer.py stdout):
-  * ``[eta] ...``   -> mirrored verbatim into the Est. time field.
-  * ``[mask] LABEL`` -> a controlled mask pause; LABEL is shown in the modal, and the run
-                        loop then blocks until the resume flag file appears.
+  * ``[eta] ...``   -> split into two readouts: the ``next <wash|mask> ~M:SS`` token feeds
+                       the "Time to next pause" field, and ``remaining ~.. | total ~..``
+                       feed the "Est. remaining" field (raw text if a line has neither).
+  * ``[<n> mask] LABEL`` -> the specific pause reason; stashed and shown in the modal.
+  * ``[mask] paused ...`` -> opens the mask-pause modal (run loop is now blocked).
+  * ``[mask] resumed.``   -> run consumed the flag; the modal is NOT reopened (it waits for
+                            the mark-started line before closing).
+  * ``[mark] started ...`` / ``SIMULATE mark`` -> the next mark has begun; closes the modal.
   * any line containing ``step N/M`` (e.g. ``[expose] step 3/9 row 1 phase B r01c01 ...``)
     updates the Progress readout; ``row N``, ``phase A|B``, and an ``r##c##`` array id are
     picked up too if present. Parsing is forgiving: whatever tokens appear are shown.
@@ -50,13 +59,11 @@ PYCON = str(Path(sys.executable).with_name("python.exe"))  # console python for 
 OPTISCAN = HERE / "optiscan.py"
 BUILD = HERE / "winlase_build_jobs.py"
 EXPOSE = HERE / "expose_wafer.py"
-PASSES_CSV = HERE / "expose_passes.csv"
 STOP_FLAG = HERE / ".expose_stop"        # UI writes this on STOP; expose_wafer polls it
 RESUME_FLAG = HERE / ".expose_resume"    # UI writes this on Resume; the mask pause waits on it
 ROOT_MEMO = HERE / ".expose_ui_root"     # remembers the last sets root
 ETCH_PARAMS = HERE / "etch_params.json"  # editable per-type etch table (passes + angles)
 DEFAULT_ROOT = HERE.parent / "output" / "sets"
-DEFAULT_PASSES = 1
 DEFAULT_PORT = "COM5"
 
 # stdout parsing (see the module docstring's contract).
@@ -64,7 +71,13 @@ RE_STEP = re.compile(r"step\s+(\d+)\s*/\s*(\d+)", re.IGNORECASE)
 RE_ROW = re.compile(r"row\s+(\d+)", re.IGNORECASE)
 RE_PHASE = re.compile(r"phase\s+([AB]|\d+)", re.IGNORECASE)
 RE_ARRAY = re.compile(r"\br(\d{2})c(\d{2})\b")
+RE_MASK_STEP = re.compile(r"^\[\d+\s+mask\]\s*(.+)$", re.IGNORECASE)  # the specific pause reason
 RE_RESUME = re.compile(r"\[resume-step\]\s+(\d+)")   # expose_wafer prints this on a controlled stop
+# [eta] line -> two operator readouts (see the module docstring's contract).
+RE_ETA_PAUSE = re.compile(r"next\s+(wash|mask)\s+~([0-9:]+)", re.IGNORECASE)
+RE_ETA_NOPAUSE = re.compile(r"no more pauses", re.IGNORECASE)
+RE_ETA_REMAIN = re.compile(r"remaining\s+~([0-9:]+)", re.IGNORECASE)
+RE_ETA_TOTAL = re.compile(r"\btotal\s+~([0-9:]+)", re.IGNORECASE)
 
 
 def is_set_dir(p):
@@ -102,25 +115,6 @@ def plan_summary(data):
     return text, n_steps, feasible
 
 
-def passes_for(set_name):
-    """Passes for a set from expose_passes.csv (exact, else 'default', else DEFAULT_PASSES)."""
-    table = {}
-    try:
-        with PASSES_CSV.open(newline="", encoding="utf-8") as stream:
-            for row in csv.reader(stream):
-                if len(row) < 2 or not row[0].strip() or row[0].lstrip().startswith("#"):
-                    continue
-                if row[0].strip().lower() in ("set", "name"):
-                    continue
-                try:
-                    table[row[0].strip()] = int(row[1])
-                except ValueError:
-                    pass
-    except OSError:
-        pass
-    return table.get(set_name, table.get("default", DEFAULT_PASSES))
-
-
 class App:
     def __init__(self, root):
         self.root = root
@@ -128,6 +122,9 @@ class App:
         self.busy = False
         self.mask_win = None
         self.mask_lbl = None
+        self.mask_resume_btn = None      # so Resume can flip to "Resuming..." and stay open
+        self.mask_status_lbl = None      # "waiting for WinLase to start the mark..."
+        self._pending_mask_label = None  # specific pause reason from the "[<n> mask]" line
         self.plan_total = 0
         self._reset_progress()
         root.title("UV Laser Exposure")
@@ -165,6 +162,15 @@ class App:
         ttk.Label(params, textvariable=self.resume_hint, foreground="#c0392b",
                   font=("Segoe UI", 9, "bold")).grid(row=0, column=5, sticky="w", padx=(10, 0))
 
+        ttk.Label(params, text="Re-datum (RIS):").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.redatum_var = tk.StringVar(value="move")   # default ON (per-move) for consistent alignment
+        self.redatum_combo = ttk.Combobox(params, textvariable=self.redatum_var, state="readonly",
+                                          width=7, values=["off", "row", "move"])
+        self.redatum_combo.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=(6, 0))
+        ttk.Label(params, text="RIS before every move / new row to hold alignment on the open-loop "
+                               "stage. Keep the travel path clear; qualify switch repeatability first.",
+                  foreground="#666").grid(row=1, column=2, columnspan=4, sticky="w", pady=(6, 0))
+
         ttk.Label(top, text="(passes + crosshatch come from the Etch table below, applied per array "
                             "type. Start step resumes mid-wafer.)",
                   foreground="#666").grid(row=3, column=0, columnspan=3, sticky="w", padx=4)
@@ -175,16 +181,22 @@ class App:
                                   font=("Segoe UI", 9, "bold"))
         self.plan_lbl.grid(row=4, column=1, columnspan=2, sticky="w", padx=4, pady=(6, 0))
 
-        ttk.Label(top, text="Est. time:").grid(row=5, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(top, text="Next pause:").grid(row=5, column=0, sticky="w", pady=(4, 0))
+        self.next_pause_var = tk.StringVar(value="--")
+        ttk.Label(top, textvariable=self.next_pause_var, foreground="#d9822b",
+                  font=("Segoe UI", 10, "bold")).grid(row=5, column=1, columnspan=2, sticky="w",
+                                                       padx=4, pady=(4, 0))
+
+        ttk.Label(top, text="Est. remaining:").grid(row=6, column=0, sticky="w", pady=(4, 0))
         self.eta_var = tk.StringVar(value="--")
         ttk.Label(top, textvariable=self.eta_var, foreground="#2d7d46",
-                  font=("Segoe UI", 9, "bold")).grid(row=5, column=1, columnspan=2, sticky="w",
+                  font=("Segoe UI", 9, "bold")).grid(row=6, column=1, columnspan=2, sticky="w",
                                                       padx=4, pady=(4, 0))
 
-        ttk.Label(top, text="Progress:").grid(row=6, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(top, text="Progress:").grid(row=7, column=0, sticky="w", pady=(4, 0))
         self.progress_var = tk.StringVar(value="--")
         ttk.Label(top, textvariable=self.progress_var, foreground="#1f6feb",
-                  font=("Segoe UI", 10, "bold")).grid(row=6, column=1, columnspan=2, sticky="w",
+                  font=("Segoe UI", 10, "bold")).grid(row=7, column=1, columnspan=2, sticky="w",
                                                        padx=4, pady=(4, 0))
         top.columnconfigure(1, weight=1)
 
@@ -417,6 +429,8 @@ class App:
                 pass
         self._set_busy(True)
         self.eta_var.set("--")
+        self.next_pause_var.set("--")
+        self._pending_mask_label = None
         self._clear_resume_hint()
         self._reset_progress()
         self._update_progress()
@@ -460,13 +474,33 @@ class App:
         s = line.strip()
         low = s.lower()
         if s.startswith("[eta] "):
-            self.eta_var.set(s[6:].strip())
+            self._parse_eta(s[6:].strip())
+        # The "[<n> mask] <label>" step line carries the SPECIFIC pause reason; stash it so
+        # the modal (opened by the generic "[mask] paused" line that follows) can name it.
+        mstep = RE_MASK_STEP.match(s)
+        if mstep:
+            self._pending_mask_label = mstep.group(1).strip()
         if low.startswith("[mask]"):
-            label = s[6:].strip()
+            rest = s[len("[mask]"):].strip()
+            if rest.lower().startswith("resumed"):
+                # The run loop consumed the Resume flag. Do NOT reopen the modal -- it stays
+                # up (showing "Resuming...") until the next mark actually starts.
+                self.p_state = "RESUMING -- waiting for WinLase to start the mark"
+                self._update_progress()
+                return
             self.p_state = "MASK PAUSE -- mask, then Resume"
             self._update_progress()
-            self._open_mask_modal(label or "Mask the completed arrays, then Resume.")
+            self._open_mask_modal(self._pending_mask_label or rest
+                                  or "Mask the completed arrays, then Resume.")
             return
+        # Resume confirmed THROUGH the marking API: WinLase has started the next mark (or the
+        # simulate stand-in has). Only now do we close the mask-pause modal. A mark line can
+        # only appear when the run is NOT paused, so an open modal here means we just resumed.
+        if self.mask_win is not None and (low.startswith("[mark] started")
+                                          or "simulate mark" in low):
+            self._close_mask_modal()
+            self.p_state = "EXPOSING"
+            self._update_progress()
         if low.startswith("[expose]") or " exposing" in low or low.startswith("exposing"):
             self.p_state = "EXPOSING"
         if "all steps complete" in low or "[resume-step] done" in low:
@@ -496,6 +530,28 @@ class App:
             self.p_array = "r%sc%s" % (m.group(1), m.group(2))
         self._update_progress()
 
+    def _parse_eta(self, body):
+        """Split an [eta] line into the two operator-facing readouts: time until the next
+        wash/mask pause (the actionable one), and the remaining/total run estimate. Lines
+        that carry neither (e.g. 'estimating...', 'done | total elapsed ..') fall back to
+        showing their text in the Est. remaining field and leave Next pause untouched."""
+        mr = RE_ETA_REMAIN.search(body)
+        mt = RE_ETA_TOTAL.search(body)
+        if mr or mt:
+            bits = []
+            if mr:
+                bits.append("~%s remaining" % mr.group(1))
+            if mt:
+                bits.append("~%s total" % mt.group(1))
+            self.eta_var.set("   ·   ".join(bits))
+        else:
+            self.eta_var.set("estimating..." if "estimating" in body.lower() else body)
+        mp = RE_ETA_PAUSE.search(body)
+        if mp:
+            self.next_pause_var.set("~%s   (%s)" % (mp.group(2), mp.group(1).lower()))
+        elif RE_ETA_NOPAUSE.search(body):
+            self.next_pause_var.set("none remaining")
+
     def _update_progress(self):
         parts = []
         if self.p_step is not None:
@@ -519,6 +575,8 @@ class App:
         for w in (self.start_spin, self.port_entry, self.focus_chk,
                   self.etch_save_btn, self.etch_reset_btn):
             w.config(state="disabled" if busy else "normal")
+        # readonly combobox re-enables to "readonly", not "normal" (else it turns editable)
+        self.redatum_combo.config(state="disabled" if busy else "readonly")
 
     def log(self, text):
         self.log_txt.configure(state="normal")
@@ -528,7 +586,9 @@ class App:
 
     # -- mask pause modal -------------------------------------------------------
     def _open_mask_modal(self, label):
-        """Pop the mask-pause prompt. Resume writes the resume flag the run loop waits on."""
+        """Pop the mask-pause prompt. Resume writes the resume flag the run loop waits on;
+        the window then stays up (button -> "Resuming...") until the run confirms by
+        starting the next mark -- see _parse_line and _resume."""
         # Drop any stale resume flag so THIS pause needs a fresh, deliberate Resume.
         try:
             RESUME_FLAG.unlink()
@@ -536,6 +596,7 @@ class App:
             pass
         if self.mask_win is not None and self.mask_win.winfo_exists():
             self.mask_lbl.config(text=label)
+            self._reset_modal_controls()   # a fresh pause: undo any "Resuming..." state
             self.mask_win.lift()
             return
         win = tk.Toplevel(self.root)
@@ -551,11 +612,19 @@ class App:
         tk.Label(win, text="Mask the completed arrays, then click Resume to continue.\n"
                            "The run loop is paused and waiting for the resume flag.",
                  bg="#161616", fg="#9aa0a6", font=("Segoe UI", 9), justify="center").pack(
-            padx=16, pady=(0, 10))
+            padx=16, pady=(0, 6))
+        # Confirmation line: after Resume, shows we are waiting for WinLase to start marking;
+        # the window only closes when that mark actually begins.
+        self.mask_status_lbl = tk.Label(win, text="", bg="#161616", fg="#2d7d46",
+                                        font=("Segoe UI", 10, "bold"), wraplength=460,
+                                        justify="center")
+        self.mask_status_lbl.pack(padx=16, pady=(0, 8))
         bar = tk.Frame(win, bg="#161616")
         bar.pack(padx=16, pady=(0, 16), fill="x")
-        tk.Button(bar, text="Resume exposure", command=self._resume, bg="#2d7d46", fg="white",
-                  font=("Segoe UI", 11, "bold"), width=18).pack(side="left", expand=True, padx=4)
+        self.mask_resume_btn = tk.Button(bar, text="Resume exposure", command=self._resume,
+                                         bg="#2d7d46", fg="white",
+                                         font=("Segoe UI", 11, "bold"), width=18)
+        self.mask_resume_btn.pack(side="left", expand=True, padx=4)
         tk.Button(bar, text="STOP (controlled)", command=self._stop_from_modal, bg="#c0392b",
                   fg="white", font=("Segoe UI", 11, "bold"), width=18).pack(side="left",
                                                                             expand=True, padx=4)
@@ -571,6 +640,20 @@ class App:
         win.attributes("-topmost", True)
         self.mask_win = win
 
+    def _reset_modal_controls(self):
+        """Return the modal to its fresh 'awaiting Resume' state (used when the same window
+        is reused for the next pause after a prior Resume left it in 'Resuming...')."""
+        if self.mask_resume_btn is not None:
+            try:
+                self.mask_resume_btn.config(state="normal", text="Resume exposure")
+            except tk.TclError:
+                pass
+        if self.mask_status_lbl is not None:
+            try:
+                self.mask_status_lbl.config(text="")
+            except tk.TclError:
+                pass
+
     def _close_mask_modal(self):
         if self.mask_win is not None:
             try:
@@ -579,6 +662,8 @@ class App:
                 pass
         self.mask_win = None
         self.mask_lbl = None
+        self.mask_resume_btn = None
+        self.mask_status_lbl = None
 
     def _resume(self):
         try:
@@ -586,9 +671,23 @@ class App:
         except OSError as exc:
             messagebox.showwarning("UV Laser Exposure", "could not write resume flag: %s" % exc)
             return
-        self.log("[resume] operator resumed -- wrote %s; run loop will continue." % RESUME_FLAG.name)
-        self._close_mask_modal()
-        self.p_state = "EXPOSING"
+        self.log("[resume] operator resumed -- wrote %s; waiting for WinLase to start the "
+                 "next mark before this window closes." % RESUME_FLAG.name)
+        # Do NOT close on the click. The window stays up until the run confirms the resume by
+        # actually starting the next mark ("[mark] started" armed / "SIMULATE mark" dry-run),
+        # closed in _parse_line. An open window therefore always means "not marking yet".
+        if self.mask_resume_btn is not None:
+            try:
+                self.mask_resume_btn.config(state="disabled", text="Resuming...")
+            except tk.TclError:
+                pass
+        if self.mask_status_lbl is not None:
+            try:
+                self.mask_status_lbl.config(
+                    text="Resuming -- waiting for WinLase to start the mark...")
+            except tk.TclError:
+                pass
+        self.p_state = "RESUMING -- waiting for WinLase to start the mark"
         self._update_progress()
 
     def _stop_from_modal(self):
@@ -614,6 +713,7 @@ class App:
         argv = [EXPOSE, s, "--yes", "--port", self._port(),
                 "--etch-params", ETCH_PARAMS,
                 "--start-step", self._start_step(),
+                "--redatum", (self.redatum_var.get() or "off"),
                 "--stop-flag", STOP_FLAG, "--resume-flag", RESUME_FLAG]
         if armed:
             argv.insert(2, "--arm")
@@ -666,11 +766,39 @@ class App:
             return
         self._run(self._expose_argv(s, armed=True))
 
+    def _cal(self):
+        """Load the exposure calibration (reference + reachable window) via transform, so
+        Home/Extract can target real stage coordinates. Keeps optiscan.py calibration-free;
+        the UI computes the target and drives it with the generic `goto`. None on failure."""
+        try:
+            import transform
+            p = HERE / "exposure_calibration.json"
+            return (transform.load_calibration(str(p)) if p.is_file()
+                    else transform.default_calibration())
+        except Exception as exc:
+            messagebox.showwarning("UV Laser Exposure", "could not load calibration: %s" % exc)
+            return None
+
     def home(self):
-        self._run([OPTISCAN, "--port", self._port(), "home", "--yes"])
+        """Send the stage to the FIELD CENTER (wafer origin under the fixed field) = the
+        calibration reference. Raw stage 0,0 is unreachable on the re-datumed rig (left of
+        the +X clamp), so Home goes to reference.stage_um instead of goto(0,0)."""
+        cal = self._cal()
+        if cal is None:
+            return
+        x, y = int(round(cal.reference.stage.x)), int(round(cal.reference.stage.y))
+        self.log("[home] -> field center (calibration reference) X=%d Y=%d" % (x, y))
+        self._run([OPTISCAN, "--port", self._port(), "goto", "--x", x, "--y", y, "--yes"])
 
     def extract(self):
-        self._run([OPTISCAN, "--port", self._port(), "extract", "--yes"])
+        """Send the stage to the +X/+Y corner of the usable window (for load/unload)."""
+        cal = self._cal()
+        if cal is None:
+            return
+        _x0, x1, _y0, y1 = cal.reach_bounds()   # (x_min, x_max, y_min, y_max); +X/+Y = (x_max, y_max)
+        x, y = int(round(x1)), int(round(y1))
+        self.log("[extract] -> +X/+Y corner X=%d Y=%d" % (x, y))
+        self._run([OPTISCAN, "--port", self._port(), "goto", "--x", x, "--y", y, "--yes"])
 
     def stop(self):
         try:
