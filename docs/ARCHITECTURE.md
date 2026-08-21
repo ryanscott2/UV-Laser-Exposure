@@ -27,11 +27,15 @@ Reference input: `081026_PFLM_Heaters.gds` — top cell `wafer`, 100 mm (dbu = 0
 The production wafer is the **v2 10-cell staggered layout** (`design/build_wafer_v2.py`): 10
 cells in 3 rows (top 3 / middle 4 / bottom 3), each cell 10.5 mm wide × 38.7 mm tall, authored
 directly in the exposed frame. Each cell fits the 60 mm usable field, so **one cell = one centered
-exposure** (10 exposures).
+exposure** (10 exposures). Rows expose top→bottom with a mask pause between them; the within-row
+stride-2 interleave (§2.2) applies unchanged — it is design-agnostic (data-driven off `plan.json`).
 
-*(The original design was 14 landscape arrays in 8 rows (1,2,2,2,2,2,2,1), 38.7 mm wide; the
-2-wide-row / masking strategy described elsewhere in this doc predates v2 and is pending a refresh.
-The exposure/mask engine itself is data-driven off `plan.json`, so it handles either layout.)*
+> **Reachability caveat (v2).** The row centers sit at exposed-Y ±19450 µm, which map to stage-Y
+> **+394 / −38506 µm** — ~400 µm *outside* the pipe-limited window `Y[−38140, 0]`. So the **top and
+> bottom rows are not reachable as-authored** (only the middle row fits); `pflm` marks the set
+> `stage.feasible=false` and the laser-PC pre-flight refuses it. Resolving it is a design call:
+> field-offset those rows (as align marks already do via `clamp_center`), tighten the row offset by
+> ~0.4 mm, or re-center. (The original 14-array/8-row landscape design is retired.)
 
 ---
 
@@ -109,13 +113,14 @@ the preview — never silent.
 **Physical row-by-row (debris redeposition)**: rows are grouped in the **exposed
 (post-rotation) frame** — a "row" is a horizontal band at (near-)constant exposed-Y, the band
 the operator masks as a unit. Rows are ordered **top→bottom** (exposed-Y descending). Within a
-row, arrays are swept along **exposed-X (rides stage-X, the 126 mm axis)** as a checkerboard
-(§2.2); between rows the stage advances along **exposed-Y (rides stage-Y, under the ceiling)**.
-A full row (both phases) is exposed and masked before ANY array of the next row — **never mix
-rows**. Grouping MUST happen AFTER the rotation (`group_exposed_rows`): a design column that
-the +90° turns into a physical row is ONE row, not one array each from two different rows
-(grouping by the pre-rotation design-Y would mix rows). The choose-rotation rule is unchanged:
-put the longer array-extent on stage-X so the short extent rides the ceiling-limited stage-Y.
+row, arrays are swept along **exposed-X (rides stage-X, the wider ~122 mm axis)** as a checkerboard
+(§2.2); between rows the stage advances along **exposed-Y (rides stage-Y, the tight pipe-limited
+axis)**. A full row (both phases) is exposed and masked before ANY array of the next row — **never
+mix rows**. Grouping MUST happen AFTER any rotation (`group_exposed_rows`): a design column that a
+rotation turns into a physical row is ONE row, not one array each from two different rows (grouping
+by the pre-rotation design-Y would mix rows). The choose-rotation rule is unchanged: put the longer
+array-extent on stage-X so the short extent rides the tighter stage-Y window (v2 is already authored
+that way in the exposed frame).
 
 **Reachability is checked twice**: (1) prep-side feasibility (machine-independent: after
 rotation, row-stack span ≤ X travel, within-row span ≤ usable Y range under the ceiling —
