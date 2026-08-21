@@ -17,6 +17,9 @@ tmp/
 *.gds2
 *.oas
 
+# Generated design manifests (reproducible from the design scripts, like the GDS)
+design/*_params.csv
+
 # --- Laser-PC runtime state (never commit) ---
 laser_pc/.expose_stop
 laser_pc/.expose_ui_root
