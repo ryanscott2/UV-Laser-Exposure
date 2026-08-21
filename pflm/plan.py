@@ -66,11 +66,14 @@ WAFER_DIAMETER_MM = 100.0
 WAFER_RADIUS_UM = 50_000
 TRAVEL_UM = (126_000, 76_000)
 STAGE_Y_MAX_UM = 6_950
-# Singulation's baked-in slicer global offset (split_klayout.py), retained by
-# request as the prep default. Field-frame nudge applied AFTER rotation/centering.
-# UNVERIFIED for this rig — re-measure; keep the laser-PC exposure_calibration
-# global_offset at 0 to avoid double-correction (§8).
-GLOBAL_OFFSET_UM = (-3447.0, 460.0)
+# Baked DXF placement offset (field-frame, applied AFTER rotation/centering). RESET TO 0
+# 2026-08-20: the coarse/hardware placement now lives in the TAUGHT reference + stations (the
+# dialed-in nest, mirroring singulation), so the old back-side -3447/+460 value is retired.
+# This is the knob for FUTURE small alignment corrections -- and it's safe here because each
+# array is centered in its own field, so a sub-mm nudge stays well inside the galvo (unlike the
+# full-field dicing tiles). Keep the laser-PC exposure_calibration global_offset at 0 too, so the
+# correction is baked once, in the DXF, not double-applied.
+GLOBAL_OFFSET_UM = (0.0, 0.0)
 
 
 def array_id(row_index: int, col_index: int) -> str:

@@ -98,10 +98,11 @@ def build_parser() -> argparse.ArgumentParser:
                               "Overrides --rotation when given.")
     p_build.add_argument("--stride", type=int, default=2,
                          help="within-row masking stride (§2.2)")
-    p_build.add_argument("--global-x", type=float, default=-3447.0,
-                         help="baked-in calibration X offset, microns (Singulation default)")
-    p_build.add_argument("--global-y", type=float, default=460.0,
-                         help="baked-in calibration Y offset, microns (Singulation default)")
+    p_build.add_argument("--global-x", type=float, default=0.0,
+                         help="baked-in DXF X correction, microns (0 = none; bulk placement is in the "
+                              "taught reference -- this is the knob for future small corrections)")
+    p_build.add_argument("--global-y", type=float, default=0.0,
+                         help="baked-in DXF Y correction, microns (0 = none; see --global-x)")
     p_build.add_argument("--params", default=None,
                          help="design manifest CSV with per-array etch params (passes, fill angles)")
     p_build.add_argument("--circles", action="store_true",
