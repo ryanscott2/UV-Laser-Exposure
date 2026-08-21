@@ -92,10 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--set", default=None, help="set name (default: GDS stem)")
     p_build.add_argument("--rotation", default="auto",
                          help="auto|0|90|180|270 design rotation")
-    p_build.add_argument("--jig-flat", choices=("front", "right", "back", "left"), default=None,
-                         help="convenience for --rotation from the wafer-flat direction on the "
-                              "stage: front(-Y)=0, right(+X)=90, back(+Y)=180, left(-X)=270. "
-                              "Overrides --rotation when given.")
+    p_build.add_argument("--jig-flat", choices=("front", "right", "back", "left"), default="back",
+                         help="wafer-flat direction on the stage -> design rotation; overrides "
+                              "--rotation. front(-Y)=0, right(+X)=90, back(+Y)=180, left(-X)=270. "
+                              "DEFAULT back(+Y)=180: the calibrated nest holds the wafer major-flat-+Y "
+                              "(the GDS is authored flat--Y, so it rotates 180 to match).")
     p_build.add_argument("--stride", type=int, default=2,
                          help="within-row masking stride (§2.2)")
     p_build.add_argument("--global-x", type=float, default=0.0,
