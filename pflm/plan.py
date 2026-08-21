@@ -141,7 +141,7 @@ def _clear_existing_dxf(jobs_dir: Path) -> None:
 
 
 def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
-              backside=True, rotation_deg="auto", within_row_stride=2,
+              backside=True, rotation_deg=0, within_row_stride=2,
               reachable_um=REACHABLE_UM,
               global_offset_um=GLOBAL_OFFSET_UM, row_tol_um=None,
               params_csv=None, pin_mode="polygon", expose_align=True,
