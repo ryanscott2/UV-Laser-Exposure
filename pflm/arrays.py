@@ -198,7 +198,7 @@ def _cluster_box(cluster: list) -> ArrayBox:
     )
 
 
-ALIGN_TOL_UM = 25_000.0   # an alignment mark must land within +/- this of field center
+ALIGN_TOL_UM = 35_000.0   # an alignment mark must land within +/- this of field center
 
 
 def detect_align_marks(layout, align_spec) -> list:
