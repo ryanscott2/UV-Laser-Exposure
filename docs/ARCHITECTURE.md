@@ -30,12 +30,14 @@ directly in the exposed frame. Each cell fits the 60 mm usable field, so **one c
 exposure** (10 exposures). Rows expose top→bottom with a mask pause between them; the within-row
 stride-2 interleave (§2.2) applies unchanged — it is design-agnostic (data-driven off `plan.json`).
 
-> **Reachability caveat (v2).** The row centers sit at exposed-Y ±19450 µm, which map to stage-Y
-> **+394 / −38506 µm** — ~400 µm *outside* the pipe-limited window `Y[−38140, 0]`. So the **top and
-> bottom rows are not reachable as-authored** (only the middle row fits); `pflm` marks the set
-> `stage.feasible=false` and the laser-PC pre-flight refuses it. Resolving it is a design call:
-> field-offset those rows (as align marks already do via `clamp_center`), tighten the row offset by
-> ~0.4 mm, or re-center. (The original 14-array/8-row landscape design is retired.)
+> **v2 reachability — handled by clamping.** The top/bottom row centers sit at exposed-Y ±19450 µm →
+> stage-Y **+394 / −38506 µm**, ~0.4 mm outside the pipe-limited window `Y[−38140, 0]`. The prep
+> **clamps** each array's stage center into the window and bakes the residual as a galvo **field
+> offset** (the align-mark mechanism: `clamp_center` + `center_override`): the stage stays in-window
+> (never into the pipe) and the array still exposes at its true location, ~0.4 mm off field center —
+> well inside the `ARRAY_FIELD_TOL_UM` = 2.5 mm tolerance and the ±39 mm field. So v2 builds
+> `stage.feasible=true`. An array whose center lands **> 2.5 mm** outside is still refused (tighten
+> the layout or re-center). (The original 14-array/8-row landscape design is retired.)
 
 ---
 

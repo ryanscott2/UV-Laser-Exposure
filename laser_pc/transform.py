@@ -623,6 +623,9 @@ def _selftest() -> int:
           "the %+.0f pipe floor / %+.0f front limit by ~%.0f um)"
           % (min_sy, max_sy, len(failures), len(tgts), _ry0, _ry1,
              max(max_sy - _ry1, _ry0 - min_sy)))
+    print("     -> the PREP clamps each center into the window and bakes the ~%.0f um residual as a "
+          "galvo field offset (<= the 2.5 mm array tolerance), so v2 still exposes at true locations."
+          % max(max_sy - _ry1, _ry0 - min_sy))
 
     # --- 2. the v2 MIDDLE row alone is fully reachable ------------------------------
     mid = [c for c in centers if c[0] == 1]

@@ -81,21 +81,28 @@ def clip_and_center(layout, pinfin_spec, bbox_um, *, design_rotation_deg=0,
 
 
 def array_circles(layout, pinfin_spec, bbox_um, *, design_rotation_deg=0,
-                  global_offset_um=(0.0, 0.0)):
+                  global_offset_um=(0.0, 0.0), center_override=None):
     """Round pins in one array's bbox as centered circles (efficient, no big Region).
 
     Iterates ONLY the pins touching ``bbox_um`` via ``begin_shapes_rec_touching``
     (O(pins in this array), not O(all pins on the layer)), treats each pin as a
     circle = (bbox center, bbox half-width), applies the same transform as
-    ``clip_and_center`` (move array center to origin, rotate k*90, add
-    calibration ``global_offset_um``), and returns ``(circles_um, bbox_um)`` where
-    circles_um is a list of ``(cx, cy, r)`` in microns. Fast + exact vs polygonizing.
+    ``clip_and_center`` (move the center to origin, rotate k*90, add calibration
+    ``global_offset_um``), and returns ``(circles_um, bbox_um)`` where circles_um is a
+    list of ``(cx, cy, r)`` in microns. Fast + exact vs polygonizing.
+
+    ``center_override`` (exposed-frame um), like ``clip_and_center``: translate about this
+    point instead of the bbox center, so a clamped array lands off-center in the field by
+    (array_center - center_override) yet still exposes at its true location.
     """
     spec = parse_layer_spec(pinfin_spec)
     indices = layer_indices_for_spec(layout, spec)
     left, bottom, right, top = bbox_um
-    cx = (left + right) / 2.0
-    cy = (bottom + top) / 2.0
+    if center_override is not None:
+        cx, cy = center_override
+    else:
+        cx = (left + right) / 2.0
+        cy = (bottom + top) / 2.0
     gx, gy = global_offset_um
     k = int(round(design_rotation_deg / 90.0)) % 4
     clip = pya.Box(_um_to_dbu(layout, left), _um_to_dbu(layout, bottom),
