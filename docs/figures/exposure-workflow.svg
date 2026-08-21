@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="470" viewBox="0 0 1200 470" role="img" aria-labelledby="title desc">
+  <title id="title">Row-by-row UV laser exposure workflow</title>
+  <desc id="desc">A design is converted into centered array jobs and an explicit schedule, transferred to the laser PC, then executed by moving the wafer and pausing between exposure groups.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" class="arrow-fill"/></marker>
+    <style>
+      text{font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.bg{fill:#fff}.panel{fill:#f6f8fa;stroke:#d0d7de;stroke-width:2}.accent{fill:#8250df}.accent-soft{fill:#fbefff;stroke:#bf8700;stroke-width:2}.blue-soft{fill:#ddf4ff;stroke:#54aeff;stroke-width:2}.ink{fill:#1f2328}.muted{fill:#59636e}.on-accent{fill:#fff}.line{stroke:#8c959f;stroke-width:3;fill:none;marker-end:url(#arrow)}.arrow-fill{fill:#8c959f}.wafer{fill:#fff;stroke:#57606a;stroke-width:3}.cell-a{fill:#8250df}.cell-b{fill:#2da44e}.cell-idle{fill:#afb8c1}.pause{fill:#fff8c5;stroke:#d4a72c;stroke-width:2}.origin{stroke:#cf222e;stroke-width:2}
+      @media(prefers-color-scheme:dark){.bg{fill:#0d1117}.panel{fill:#161b22;stroke:#30363d}.accent-soft{fill:#2d2200;stroke:#d29922}.blue-soft{fill:#0c2d3d;stroke:#1f6feb}.ink{fill:#e6edf3}.muted{fill:#8b949e}.line{stroke:#6e7681}.arrow-fill{fill:#6e7681}.wafer{fill:#0d1117;stroke:#8b949e}.accent{fill:#d2a8ff}.cell-a{fill:#a371f7}.cell-b{fill:#3fb950}.cell-idle{fill:#484f58}.pause{fill:#3b2e00;stroke:#d29922}.origin{stroke:#ff7b72}}
+    </style>
+  </defs>
+  <rect class="bg" width="1200" height="470" rx="24"/>
+  <text x="55" y="62" class="ink" font-size="30" font-weight="700">One centered job per array, one explicit schedule</text>
+  <text x="55" y="94" class="muted" font-size="17">Prep decides what happens; the laser PC validates and executes it.</text>
+
+  <rect x="55" y="135" width="275" height="270" rx="18" class="panel"/>
+  <text x="85" y="175" class="accent" font-size="15" font-weight="700" letter-spacing="1.2">GDS / OAS / DXF</text>
+  <circle cx="192" cy="275" r="82" class="wafer"/>
+  <g transform="translate(142 226)">
+    <rect x="12" y="0" width="24" height="42" rx="4" class="cell-a"/><rect x="42" y="0" width="24" height="42" rx="4" class="cell-b"/><rect x="72" y="0" width="24" height="42" rx="4" class="cell-a"/>
+    <rect x="0" y="49" width="24" height="42" rx="4" class="cell-b"/><rect x="30" y="49" width="24" height="42" rx="4" class="cell-a"/><rect x="60" y="49" width="24" height="42" rx="4" class="cell-b"/><rect x="90" y="49" width="24" height="42" rx="4" class="cell-a"/>
+    <rect x="12" y="98" width="24" height="42" rx="4" class="cell-a"/><rect x="42" y="98" width="24" height="42" rx="4" class="cell-b"/><rect x="72" y="98" width="24" height="42" rx="4" class="cell-a"/>
+  </g>
+  <text x="192" y="385" class="ink" font-size="18" font-weight="650" text-anchor="middle">Detect + order arrays</text>
+
+  <path d="M350 270H435" class="line"/>
+
+  <rect x="455" y="135" width="290" height="270" rx="18" class="blue-soft"/>
+  <text x="485" y="175" class="accent" font-size="15" font-weight="700" letter-spacing="1.2">SET FOLDER</text>
+  <g transform="translate(490 205)">
+    <rect x="0" y="0" width="76" height="76" rx="10" class="panel"/><path d="M38 20V56M20 38H56" class="origin"/>
+    <rect x="92" y="0" width="76" height="76" rx="10" class="panel"/><path d="M130 20V56M112 38H148" class="origin"/>
+  </g>
+  <text x="490" y="310" class="ink" font-size="18" font-weight="650">jobs/*.dxf</text><text x="490" y="336" class="muted" font-size="15">plan.json + manifest</text><text x="490" y="362" class="muted" font-size="15">expose / mask / wash steps</text>
+
+  <path d="M765 270H850" class="line"/>
+
+  <rect x="870" y="135" width="275" height="270" rx="18" class="panel"/>
+  <text x="900" y="175" class="accent" font-size="15" font-weight="700" letter-spacing="1.2">LASER PC</text>
+  <rect x="905" y="205" width="56" height="42" rx="8" class="cell-a"/><text x="933" y="232" class="on-accent" font-size="15" font-weight="700" text-anchor="middle">A</text>
+  <path d="M972 226H1003" class="line"/>
+  <rect x="1015" y="205" width="92" height="42" rx="8" class="pause"/><text x="1061" y="232" class="ink" font-size="14" font-weight="650" text-anchor="middle">MASK</text>
+  <path d="M1061 258V288" class="line"/>
+  <rect x="905" y="300" width="56" height="42" rx="8" class="cell-b"/><text x="933" y="327" class="on-accent" font-size="15" font-weight="700" text-anchor="middle">B</text>
+  <path d="M972 321H1003" class="line"/>
+  <rect x="1015" y="300" width="92" height="42" rx="8" class="pause"/><text x="1061" y="327" class="ink" font-size="14" font-weight="650" text-anchor="middle">NEXT ROW</text>
+  <text x="1007" y="380" class="ink" font-size="17" font-weight="650" text-anchor="middle">Move → mark → pause</text>
+  <text x="1007" y="402" class="muted" font-size="13" text-anchor="middle">pre-flight before motion</text>
+</svg>
+
