@@ -90,13 +90,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_build.add_argument("--bbox", default="4/0", help="per-array bbox layer selector")
     p_build.add_argument("--align", default="5/0", help="alignment-mark layer selector")
     p_build.add_argument("--set", default=None, help="set name (default: GDS stem)")
-    p_build.add_argument("--rotation", default="auto",
-                         help="auto|0|90|180|270 design rotation")
-    p_build.add_argument("--jig-flat", choices=("front", "right", "back", "left"), default="back",
-                         help="wafer-flat direction on the stage -> design rotation; overrides "
-                              "--rotation. front(-Y)=0, right(+X)=90, back(+Y)=180, left(-X)=270. "
-                              "DEFAULT back(+Y)=180: the calibrated nest holds the wafer major-flat-+Y "
-                              "(the GDS is authored flat--Y, so it rotates 180 to match).")
+    p_build.add_argument("--rotation", default="0",
+                         help="auto|0|90|180|270 design rotation (default 0: designs are authored in "
+                              "the exposed frame, e.g. build_wafer_v2, so no rotation is applied)")
+    p_build.add_argument("--jig-flat", choices=("front", "right", "back", "left"), default=None,
+                         help="convenience: wafer-flat direction on the stage -> design rotation, "
+                              "OVERRIDES --rotation. front(-Y)=0, right(+X)=90, back(+Y)=180, "
+                              "left(-X)=270. Use only for a GDS authored flat--Y that must rotate to "
+                              "the physical nest; exposed-frame designs need none (the default).")
     p_build.add_argument("--stride", type=int, default=2,
                          help="within-row masking stride (§2.2)")
     p_build.add_argument("--global-x", type=float, default=0.0,

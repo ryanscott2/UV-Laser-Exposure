@@ -104,12 +104,12 @@ and the default rotation is now selected by `--jig-flat` (§5.6). The invariant 
 
 `design_rotation_deg` ∈ {0,90,180,270} is applied in prep to both the geometry (so the
 centered DXFs carry the rotated features) and the array-center coordinates (so stage targets
-use the rotated "exposed frame"). The CLI default is **`--jig-flat back` = 180°**, which
-**overrides `--rotation`**: `--jig-flat` names the physical wafer-flat direction on the stage
-and maps it to a rotation — front(−Y)=0, right(+X)=90, back(+Y)=180, left(−X)=270 — so the GDS
-(authored flat−Y) turns to match the calibrated nest (major-flat +Y). When `--jig-flat` is
-omitted, `--rotation auto` picks the rotation that puts the larger row-stack span on stage-X
-and keeps every target inside the reachable window. Rotation is explicit, logged, and shown in
+use the rotated "exposed frame"). **The CLI default is `--rotation 0`** (no rotation): current
+designs (e.g. `build_wafer_v2`) are authored directly in the exposed frame, so nothing needs to
+turn. The optional **`--jig-flat`** convenience names a physical wafer-flat direction and
+**overrides `--rotation`** — front(−Y)=0, right(+X)=90, back(+Y)=180, left(−X)=270 — for the case
+of a GDS authored flat−Y that must turn to a differently-flatted nest; leave it off for
+exposed-frame designs. Rotation is explicit, logged, and shown in
 the preview — never silent.
 
 **Physical row-by-row (debris redeposition)**: rows are grouped in the **exposed
@@ -209,7 +209,7 @@ WinLaseJobs/        # (added on laser PC) <set>_<array_id>.wlj — gitignored, r
   "wafer": { "diameter_mm": 100.0, "radius_um": 50000 },
   "field": { "usable_half_um": 30000, "qualified_um": 54000, "full_um": 78485 },
   "backside": true,
-  "design_rotation_deg": 180,
+  "design_rotation_deg": 0,
   "exposure_order": "top_to_bottom",
   "mask_strategy": { "within_row_stride": 2, "mask_between_groups": true },
   "align_marks_um": [[x0,y0], ...],
@@ -425,7 +425,7 @@ def build_schedule(rows, within_row_stride=2) -> list:  # the §2.2 group+mask a
 [--rotation auto|0|90|180|270] [--jig-flat front|right|back|left] [--stride N]
 [--global-x UM] [--global-y UM] [--params CSV] [--circles] [--ablate-dead-space]
 [--cell 4/0] [--no-dead-space-wash] [--no-backside] [--output DIR]` → `build_set(...)`.
-(`--jig-flat` defaults to `back` = 180° and **overrides** `--rotation`; front/right/back/left → 0/90/180/270. See §2.1.)
+(`--rotation` defaults to `0`; the optional `--jig-flat` overrides it — front/right/back/left → 0/90/180/270. See §2.1.)
 
 ---
 

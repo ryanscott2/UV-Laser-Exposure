@@ -48,19 +48,20 @@ def clip_and_center(layout, pinfin_spec, bbox_um, *, design_rotation_deg=0,
     calibration ``global_offset_um``).
 
     ``center_override`` (exposed-frame um): translate about this point instead of
-    the bbox center. Used for alignment marks that can't be field-centered — the
-    stage centers on ``center_override`` (a reachable point) and the mark lands
-    off-center in the field by (mark_center - center_override), i.e. at its true
-    wafer location. For pinfin arrays it is None (translate about the bbox center).
+    the bbox center. Used for alignment marks and clamped arrays that can't be
+    field-centered — the stage centers on ``center_override`` (a reachable point)
+    and the shape lands off-center in the field by (exposed_center - center_override),
+    i.e. at its true wafer location. For a field-centered array it is None (translate
+    about the bbox center).
 
-    Net map for a point p: ``p -> R(p - center) + global_offset``.
+    Net map for a point p:
+      - no override:  ``p -> R(p - bbox_center) + global_offset``
+      - override:     ``p -> R(p) - center_override + global_offset``
+    center_override is an EXPOSED-frame (post-rotation) point, so it is subtracted
+    AFTER the rotation. Subtracting it before (as a design-frame center) is only
+    correct at deg 0 and mis-places the shape by (R(c) - c) at any other rotation.
     """
     left, bottom, right, top = bbox_um
-    if center_override is not None:
-        cx, cy = center_override
-    else:
-        cx = (left + right) / 2.0
-        cy = (bottom + top) / 2.0
 
     region = pinfin_region(layout, pinfin_spec)
     clip_box = pya.Box(
@@ -71,12 +72,19 @@ def clip_and_center(layout, pinfin_spec, bbox_um, *, design_rotation_deg=0,
 
     gx, gy = global_offset_um
     rot_k = int(round(design_rotation_deg / 90.0)) % 4
-    # Applied right-to-left: first move the array center to the origin, then rotate
-    # about the origin, then apply the calibration offset.
-    to_origin = pya.Trans(pya.Trans.R0, _um_to_dbu(layout, -cx), _um_to_dbu(layout, -cy))
     rotate = pya.Trans(rot_k)  # k*90 CCW about the origin
     offset = pya.Trans(pya.Trans.R0, _um_to_dbu(layout, gx), _um_to_dbu(layout, gy))
-    region.transform(offset * rotate * to_origin)
+    if center_override is not None:
+        # Rotate about the origin first, THEN subtract the exposed-frame center.
+        cox, coy = center_override
+        to_center = pya.Trans(pya.Trans.R0, _um_to_dbu(layout, -cox), _um_to_dbu(layout, -coy))
+        region.transform(offset * to_center * rotate)
+    else:
+        # Move the bbox center to the origin first, then rotate about the origin.
+        cx = (left + right) / 2.0
+        cy = (bottom + top) / 2.0
+        to_origin = pya.Trans(pya.Trans.R0, _um_to_dbu(layout, -cx), _um_to_dbu(layout, -cy))
+        region.transform(offset * rotate * to_origin)
     return region
 
 
@@ -91,18 +99,16 @@ def array_circles(layout, pinfin_spec, bbox_um, *, design_rotation_deg=0,
     ``global_offset_um``), and returns ``(circles_um, bbox_um)`` where circles_um is a
     list of ``(cx, cy, r)`` in microns. Fast + exact vs polygonizing.
 
-    ``center_override`` (exposed-frame um), like ``clip_and_center``: translate about this
-    point instead of the bbox center, so a clamped array lands off-center in the field by
-    (array_center - center_override) yet still exposes at its true location.
+    ``center_override`` (exposed-frame um), like ``clip_and_center``: subtract this
+    point AFTER the rotation (not the bbox center before it), so a clamped array lands
+    off-center in the field by (exposed_center - center_override) yet still exposes at its
+    true location. Same composition as ``clip_and_center`` -- correct at any rotation.
     """
     spec = parse_layer_spec(pinfin_spec)
     indices = layer_indices_for_spec(layout, spec)
     left, bottom, right, top = bbox_um
-    if center_override is not None:
-        cx, cy = center_override
-    else:
-        cx = (left + right) / 2.0
-        cy = (bottom + top) / 2.0
+    cx = (left + right) / 2.0   # bbox center, used only when there is no override
+    cy = (bottom + top) / 2.0
     gx, gy = global_offset_um
     k = int(round(design_rotation_deg / 90.0)) % 4
     clip = pya.Box(_um_to_dbu(layout, left), _um_to_dbu(layout, bottom),
@@ -120,11 +126,19 @@ def array_circles(layout, pinfin_spec, bbox_um, *, design_rotation_deg=0,
                 if not (left <= pcx <= right and bottom <= pcy <= top):
                     it.next(); continue        # only pins whose center is inside this box
                 r = _dbu_to_um(layout, pb.width() / 2.0)
-                x = pcx - cx
-                y = pcy - cy
-                if k == 1:   x, y = -y, x
-                elif k == 2: x, y = -x, -y
-                elif k == 3: x, y = y, -x
+                if center_override is not None:
+                    x, y = pcx, pcy                 # rotate about the origin first...
+                    if k == 1:   x, y = -y, x
+                    elif k == 2: x, y = -x, -y
+                    elif k == 3: x, y = y, -x
+                    x -= center_override[0]          # ...then subtract the exposed-frame center
+                    y -= center_override[1]
+                else:
+                    x = pcx - cx                     # move the bbox center to the origin...
+                    y = pcy - cy
+                    if k == 1:   x, y = -y, x        # ...then rotate about it
+                    elif k == 2: x, y = -x, -y
+                    elif k == 3: x, y = y, -x
                 x += gx; y += gy
                 circles.append((x, y, r))
                 minx = min(minx, x - r); maxx = max(maxx, x + r)
