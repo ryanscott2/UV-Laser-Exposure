@@ -27,7 +27,14 @@ BBOX_HALF_W_FRAC = 0.54          # letter-cell bbox half-width, x glyph width (<
 BBOX_HALF_H_FRAC = 0.60          # letter-cell bbox half-height, x glyph height
 LINE_GAP_UM = 3500.0             # vertical gap between line edges
 WAFER_R_UM = 50000.0
-PIN_LAYER, BBOX_LAYER, FRAME_LAYER = (3, 0), (4, 0), (1, 0)
+PIN_LAYER, BBOX_LAYER, FRAME_LAYER, ALIGN_LAYER = (3, 0), (4, 0), (1, 0), (5, 0)
+
+# Alignment fiducials ripped verbatim from 081826_UVPFLMv2.gds (layer 5/0): four crosses
+# (H-bar + V-bar) at r~45 mm, outside the text, so a later metalization step can register to
+# them. pflm.build_set auto-detects 5/0 and etches each mark last (15-pass crosshatch).
+ALIGN_CENTERS_UM = [(-44985.0, 0.0), (45015.0, 0.0), (15.0, -45000.0), (15.0, 45000.0)]
+ALIGN_ARM_UM = 1250.0            # cross arm length (full)
+ALIGN_W_UM = 50.0                # cross arm width
 
 
 def _um(ly, v):
@@ -38,6 +45,7 @@ def build(lines, out):
     ly = pya.Layout(); ly.dbu = 0.001
     top = ly.create_cell("SOUVENIR")
     Lp, Lb, Lf = ly.layer(*PIN_LAYER), ly.layer(*BBOX_LAYER), ly.layer(*FRAME_LAYER)
+    La = ly.layer(*ALIGN_LAYER)
     tg = pya.TextGenerator.default_generator()
 
     chars = {c for line in lines for c in line if c != " "}
@@ -57,6 +65,13 @@ def build(lines, out):
         [pya.Point(_um(ly, WAFER_R_UM * math.cos(2 * math.pi * i / 512)),
                    _um(ly, WAFER_R_UM * math.sin(2 * math.pi * i / 512)))
          for i in range(512)]))
+
+    # Alignment fiducials (layer 5/0): four crosses, each an H-bar + a V-bar.
+    for mx, my in ALIGN_CENTERS_UM:
+        top.shapes(La).insert(pya.Box(_um(ly, mx - ALIGN_ARM_UM / 2), _um(ly, my - ALIGN_W_UM / 2),
+                                      _um(ly, mx + ALIGN_ARM_UM / 2), _um(ly, my + ALIGN_W_UM / 2)))
+        top.shapes(La).insert(pya.Box(_um(ly, mx - ALIGN_W_UM / 2), _um(ly, my - ALIGN_ARM_UM / 2),
+                                      _um(ly, mx + ALIGN_W_UM / 2), _um(ly, my + ALIGN_ARM_UM / 2)))
 
     n_letters = 0
     xs, ys = [], []
@@ -89,7 +104,7 @@ def build(lines, out):
 
     ly.write(out)
     corner_r = max((x * x + yy * yy) ** 0.5 for x in (min(xs), max(xs)) for yy in (min(ys), max(ys)))
-    print("wrote %s  (%d letters)" % (out, n_letters))
+    print("wrote %s  (%d letters + %d align crosses on 5/0)" % (out, n_letters, len(ALIGN_CENTERS_UM)))
     print("\n".join(summary))
     print("  text extent X[%.1f,%.1f] Y[%.1f,%.1f] mm; farthest corner r=%.1f mm (wafer r=50)\n"
           % (min(xs) / 1000, max(xs) / 1000, min(ys) / 1000, max(ys) / 1000, corner_r / 1000))
