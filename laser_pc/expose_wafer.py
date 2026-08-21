@@ -1003,31 +1003,36 @@ def main() -> int:
                 aid = step.get("array_id")
                 a = arrays[aid]
                 row_i = step.get("row_index")
-                # Optional re-datum (RIS) to keep the open-loop stage from accumulating drift
-                # over the run: 'move' before every array, 'row' when entering a new physical
-                # row (row_index is never None here, so the first array always re-datums).
-                # RIS drives to the hard limits -- path must be clear. A failure is a controlled
+                # Re-datum cadence (RIS) to keep the open-loop stage from accumulating drift:
+                # 'move' at every array, 'row' when entering a new physical row (row_index is
+                # never None here, so the first array always re-datums). MOVE FIRST, then RIS,
+                # then re-command the target: RIS drives to the hard limits and RETURNS to its
+                # pre-RIS position (the target we just moved to), re-referencing the datum there,
+                # so the final goto is a short, consistent datum->target correction in the fresh
+                # frame. RIS drives full travel (path must be clear); a failure is a controlled
                 # stop: never move/fire on a datum we could not re-establish.
-                if args.redatum == "move" or (args.redatum == "row" and row_i != last_row):
-                    print("[redatum] RIS before %s (restoring index at the hard limits) ..." % aid)
-                    try:
-                        rx, ry = stage.redatum()
-                    except (RuntimeError, TimeoutError, ValueError) as exc:
-                        print("*** re-datum (RIS) FAILED before %s: %s -- controlled stop, "
-                              "not firing. ***" % (aid, exc))
-                        stopped = True
-                        break
-                    print("[redatum] datum restored; stage reads X=%d Y=%d" % (rx, ry))
-                    if abort():
-                        print("aborted after re-datum, before moving to %s." % aid)
-                        stopped = True
-                        break
+                do_ris = (args.redatum == "move" or (args.redatum == "row" and row_i != last_row))
                 last_row = row_i
                 tx, ty = transform.wafer_to_stage(a["exposed_center_um"], cal)
                 tx, ty = int(round(tx)), int(round(ty))
                 print("\n[%d %s] move -> X=%d Y=%d" % (s, aid, tx, ty))
                 move_t0 = time.time()
-                stage.goto(tx, ty)
+                stage.goto(tx, ty)                              # move to the target FIRST
+                if do_ris:
+                    print("[redatum] RIS at %s (restoring index at the hard limits) ..." % aid)
+                    try:
+                        rx, ry = stage.redatum()
+                    except (RuntimeError, TimeoutError, ValueError) as exc:
+                        print("*** re-datum (RIS) FAILED at %s: %s -- controlled stop, "
+                              "not firing. ***" % (aid, exc))
+                        stopped = True
+                        break
+                    print("[redatum] datum restored; stage reads X=%d Y=%d" % (rx, ry))
+                    if abort():
+                        print("aborted after re-datum, before re-seating %s." % aid)
+                        stopped = True
+                        break
+                    stage.goto(tx, ty)                          # re-seat in the fresh datum frame
                 if args.focus:
                     stage.goto_z(focus_z)
                 eta.record_move(time.time() - move_t0)
