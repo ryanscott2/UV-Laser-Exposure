@@ -15,7 +15,7 @@ the wafer so each target sits under the beam.
 
 | Half | Where | Python | Deps | Does |
 |---|---|---|---|---|
-| **Prep** (`pflm/`, `prep_app/`) | design PC (online) | 3.11+ | klayout, ezdxf, PySide6 | Load GDS → pick pinfin/bbox/align layers → detect the 14 arrays, group into rows, order top→bottom → write a **set folder** (`plan.json` + one centered DXF per array + manifest). PySide6/QML preview app. |
+| **Prep** (`pflm/`, `prep_app/`) | design PC (online) | 3.11+ | klayout, ezdxf, PySide6 | Load GDS → pick pinfin/bbox/align layers → detect the arrays (10 in the v2 layout), group into rows, order top→bottom → write a **set folder** (`plan.json` + one centered DXF per array + manifest). PySide6/QML preview app. |
 | **Run** (`laser_pc/`) | offline laser PC | 3.8 | pyserial, pywin32 (local wheels) | Teach one stage reference, build one WinLase `.wlj` per array, then step the stage row-by-row (top→bottom) marking each centered array, pausing between rows so you can mask. Tkinter launcher. SIMULATE by default; `--arm` fires. |
 
 The two halves meet at a **set folder** under `output/sets/<name>/`. See

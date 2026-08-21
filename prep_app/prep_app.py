@@ -1172,7 +1172,7 @@ class Bridge(QObject):
 
         # Match pflm.cli build flags exactly -- no invented flags.
         # --circles: these are round-pin arrays; CIRCLE export is exact and fast,
-        # where polygonizing 512-gon x ~10k pins x 14 arrays is minutes-slow.
+        # where polygonizing 512-gon x ~10k pins x 10 arrays is minutes-slow.
         arguments = [
             "-m", "pflm.cli", "build", str(path),
             "--pinfin", pinfin,

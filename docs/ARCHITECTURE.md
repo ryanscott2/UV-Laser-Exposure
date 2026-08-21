@@ -24,10 +24,14 @@ Reference input: `081026_PFLM_Heaters.gds` — top cell `wafer`, 100 mm (dbu = 0
 | `5/0` | 8 shapes = **4 marks** at (0,±45) & (±45,0) mm (coincident pairs; extent ±45.6 mm) | reference marks (not exposed) |
 | `0/0`, `1/0` | 100 mm outline, 97 mm box | wafer reference |
 
-14 arrays tile 8 rows (1,2,2,2,2,2,2,1), each array 38.7 × 10.5 mm, 10.5 mm row pitch.
-Each array (38.7 mm wide) fits the 60 mm usable field, so **one array = one centered
-exposure**. A 2-array row spans 77 mm (> 60 mm), so a 2-wide row is exposed as two separate
-centered exposures (left, then right), then the whole row is masked.
+The production wafer is the **v2 10-cell staggered layout** (`design/build_wafer_v2.py`): 10
+cells in 3 rows (top 3 / middle 4 / bottom 3), each cell 10.5 mm wide × 38.7 mm tall, authored
+directly in the exposed frame. Each cell fits the 60 mm usable field, so **one cell = one centered
+exposure** (10 exposures).
+
+*(The original design was 14 landscape arrays in 8 rows (1,2,2,2,2,2,2,1), 38.7 mm wide; the
+2-wide-row / masking strategy described elsewhere in this doc predates v2 and is pending a refresh.
+The exposure/mask engine itself is data-driven off `plan.json`, so it handles either layout.)*
 
 ---
 

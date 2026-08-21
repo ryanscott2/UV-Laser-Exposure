@@ -538,6 +538,10 @@ def teach_reference(optiscan, cal=None, wafer_um=(0.0, 0.0), out_path=None, step
 def _known_array_centers_um():
     """The 14 PFLM array centers in the design frame (section 1 / 2.1 / 4.1).
 
+    NOTE: this is the ORIGINAL 14-array design, used by this module's __main__ self-test ONLY.
+    Production is now the v2 10-cell staggered layout (design/build_wafer_v2.py); the production
+    check_reachable() is data-driven off plan.json, so it is unaffected. Self-test pending a v2 refresh.
+
     8 rows (1,2,2,2,2,2,2,1), 10.5 mm pitch, top row y = +36862 um; two-wide rows have
     centers at x = +/-19350 um; single-array rows at x = 0.
     """
