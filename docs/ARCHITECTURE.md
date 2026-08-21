@@ -43,11 +43,13 @@ Three frames (all lengths in **microns** in code unless a name ends in `_mm`):
    on the physical field center. This is the whole ballgame — never enable fit-to-field.
 3. **Stage frame** — Prior OptiScan III (ES111) absolute microns. Alignment is **mechanical**
    (the jig + wafer flats fix the wafer at a known, repeatable position), so the wafer→stage
-   mapping is a **FIXED machine constant — there is NO teaching** (§6). The fine calibration
-   OFFSET is baked into the **DXF** at prep time, never applied on the stage. **Travel
+   mapping is a **fixed machine constant captured in a ONE-TIME taught stage reference**
+   (mirroring Singulation), not a per-wafer teach (§6). The fine calibration lives in that
+   taught reference; the DXF **global offset stays 0** (reserved for future small DXF
+   corrections), so the correction is never double-applied on the stage. **Travel
    envelope: X = 126 mm, Y = 76 mm**
    (`laser-pc/optiscan.py` `TRAVEL_X_UM=126000`, `TRAVEL_Y_UM=76000`, from the controller's
-   STAGE report). Placement verified to 3 µm; max jog step 20 mm.
+   STAGE report). Placement verified to 1 µm (`POSITION_TOLERANCE_UM`); max jog step 20 mm.
 
 **Field sizes** (from Singulation, machine constants): full galvo ≈ 78485 µm; usable
 central `USABLE_FIELD_HALF_UM = 30000` (±30 mm); qualified/declared `QUALIFIED_FIELD_UM =
@@ -61,30 +63,44 @@ central `USABLE_FIELD_HALF_UM = 30000` (±30 mm); qualified/declared `QUALIFIED_
 
 The stage is the binding constraint, not the field. Two limits:
 
-- **Travel envelope**: X = 126 mm, Y = 76 mm.
-- **Stage-Y ceiling**: stage Y may not exceed the value it reaches at the far row of the
-  Singulation jig (its P3/P4), `STAGE_Y_MAX_UM` (default **+6950 µm**, from
-  `optiscan_positions.json`; re-measured on this rig). Targets above it are refused.
+- **Travel envelope**: X = 126 mm, Y = 76 mm (nominal).
+- **Reachable window (binding)**: after the 2026-08 re-datum the usable stage frame is
+  **ASYMMETRIC** — `reachable_um` X ∈ [16236, 138529] µm, Y ∈ [−38140, 0] µm. The −38140 floor
+  is a **PIPE** at the back of the stage (not the deeper hard stop) and the Y top is 0; targets
+  outside this window are refused. (The old symmetric ±travel model and the +6950 µm P3/P4
+  ceiling `STAGE_Y_MAX_UM` are demoted — the laser-PC binding limit is now this window, with
+  `stage_y_max_um` = 0.)
 
-Singulation's taught mapping (solved from its P1..P4 points, same wafer/stage/jig family):
-`stage_X = 5590 − wafer_X`, `stage_Y = −18450 + wafer_Y` (µm). The PFLM arrays span
+The ported **definitive** taught mapping (from the dialed-in Singulation nest, confirmed on
+this rig): `stage_X = 84433 − wafer_X`, `stage_Y = −18830 + wafer_Y` (µm), reference
+`(84355, −19056)`. (Singulation's older P1..P4 fit `stage_X = 5590 − wafer_X`,
+`stage_Y = −18450 + wafer_Y` is a superseded fallback only.) The PFLM arrays span
 **wafer-Y ∈ [−36.6, +36.9] mm (73.5 mm)** and **wafer-X ∈ [−19.35, +19.35] mm (38.7 mm)**.
-Unrotated, the top row (wafer_Y = +36.86 mm) needs stage_Y = +18412 µm — **~11.5 mm past
-the +6950 ceiling → unreachable.**
+Unrotated, the top row (wafer_Y = +36.86 mm) needs stage_Y ≈ +18412 µm — **above the reachable
+window's Y-max of 0 → unreachable.**
 
 **Fix: rotate the DESIGN, not the wafer** (operator preference; flat-registered wafer stays
 seated normally). A **+90°** design rotation swaps which wafer axis carries the long span:
 
 | | row-stack span → axis | within-row span → axis | max stage-Y | fits? |
 |---|---|---|---|---|
-| 0° (unrotated) | 73.5 mm → stage-Y (76, ceiling +6.95) | 38.7 mm → stage-X (126) | +18412 µm | ✗ over ceiling |
-| **+90° (default)** | 73.5 mm → **stage-X (126)** | 38.7 mm → **stage-Y** | **+900 µm** | ✓ big margin |
+| 0° (unrotated) | 73.5 mm → stage-Y (short, ceiling-limited axis) | 38.7 mm → stage-X (126) | +18412 µm | ✗ over Y-max |
+| **+90°** | 73.5 mm → **stage-X (126)** | 38.7 mm → **stage-Y** | **+900 µm** | ✓ long span on roomy axis |
+
+*(The `max stage-Y` figures are illustrative, from the pre-re-datum Singulation mapping / +6950
+ceiling; the current binding limit is the asymmetric reachable window in the first bullet above,
+and the default rotation is now selected by `--jig-flat` (§5.6). The invariant is unchanged: the
+73.5 mm row-stack must ride the roomy stage-X axis.)*
 
 `design_rotation_deg` ∈ {0,90,180,270} is applied in prep to both the geometry (so the
 centered DXFs carry the rotated features) and the array-center coordinates (so stage targets
-use the rotated "exposed frame"). Default = **auto**: pick the rotation that puts the larger
-row-stack span on stage-X AND keeps every stage-Y target ≤ ceiling and inside travel; for
-this GDS that is +90°. Rotation is explicit, logged, and shown in the preview — never silent.
+use the rotated "exposed frame"). The CLI default is **`--jig-flat back` = 180°**, which
+**overrides `--rotation`**: `--jig-flat` names the physical wafer-flat direction on the stage
+and maps it to a rotation — front(−Y)=0, right(+X)=90, back(+Y)=180, left(−X)=270 — so the GDS
+(authored flat−Y) turns to match the calibrated nest (major-flat +Y). When `--jig-flat` is
+omitted, `--rotation auto` picks the rotation that puts the larger row-stack span on stage-X
+and keeps every target inside the reachable window. Rotation is explicit, logged, and shown in
+the preview — never silent.
 
 **Physical row-by-row (debris redeposition)**: rows are grouped in the **exposed
 (post-rotation) frame** — a "row" is a horizontal band at (near-)constant exposed-Y, the band
@@ -182,7 +198,7 @@ WinLaseJobs/        # (added on laser PC) <set>_<array_id>.wlj — gitignored, r
   "wafer": { "diameter_mm": 100.0, "radius_um": 50000 },
   "field": { "usable_half_um": 30000, "qualified_um": 54000, "full_um": 78485 },
   "backside": true,
-  "design_rotation_deg": 90,
+  "design_rotation_deg": 180,
   "exposure_order": "top_to_bottom",
   "mask_strategy": { "within_row_stride": 2, "mask_between_groups": true },
   "align_marks_um": [[x0,y0], ...],
@@ -374,10 +390,11 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
               travel_um=(126000,76000), stage_y_max_um=6950,
               global_offset_um=GLOBAL_OFFSET_UM, row_tol_um=None,
               overwrite_in_place=True) -> dict:
-    # GLOBAL_OFFSET_UM = (-3447.0, 460.0): Singulation's baked-in slicer offset,
-    # RETAINED by request as the prep default (field-frame nudge applied after
-    # rotation/centering). Unverified for this rig; keep laser-PC calibration
-    # global_offset at 0 to avoid double-correction (§8).
+    # GLOBAL_OFFSET_UM = (0.0, 0.0): the old Singulation -3447/+460 slicer offset is RETIRED.
+    # Bulk placement now lives in the TAUGHT stage reference (mirroring Singulation); this
+    # zeroed knob is reserved for FUTURE small DXF corrections (a field-frame nudge applied
+    # after rotation/centering). Keep the laser-PC calibration global_offset at 0 too, so the
+    # correction is baked once in the DXF, not double-applied (§8).
     """Full prep pipeline:
        read GDS -> detect_arrays (design frame) -> choose_rotation (extent-based) ->
        group_exposed_rows (physical rows = exposed-Y bands, top->bottom; never mixed) ->
@@ -394,32 +411,38 @@ def build_schedule(rows, within_row_stride=2) -> list:  # the §2.2 group+mask a
 ### 5.6 `pflm/cli.py`
 `python -m pflm.cli inspect <gds>` → print the layer table.
 `python -m pflm.cli build <gds> [--pinfin 3/0] [--bbox 4/0] [--align 5/0] [--set NAME]
-[--global-x UM] [--global-y UM] [--no-backside]` → `build_set(...)`.
+[--rotation auto|0|90|180|270] [--jig-flat front|right|back|left] [--stride N]
+[--global-x UM] [--global-y UM] [--params CSV] [--circles] [--ablate-dead-space]
+[--cell 4/0] [--no-dead-space-wash] [--no-backside] [--output DIR]` → `build_set(...)`.
+(`--jig-flat` defaults to `back` = 180° and **overrides** `--rotation`; front/right/back/left → 0/90/180/270. See §2.1.)
 
 ---
 
 ## 6. Wafer→stage transform & alignment (`laser_pc/transform.py`)  [NEW, pure math, py3.8]
 
-Alignment is **mechanical** (jig + flats fix the wafer) — **NO teaching, no optics**. The
-wafer→stage mapping is a fixed machine constant: `transform.default_calibration()` is used
-unless a one-time `exposure_calibration.json` config overrides the fixed constants (it is a
-site config, NOT a per-wafer teach). The fine calibration OFFSET is baked into the DXF
-(`global_offset`, §5.5) — `global_offset_um` on the stage stays `(0, 0)`. `teach_reference` /
-`solve_transform` remain only as OPTIONAL one-time helpers to establish those fixed constants;
-the run path never needs them.
+Alignment is **mechanical** (jig + flats fix the wafer) plus **ONE taught stage reference — no
+optics**. The wafer→stage mapping is a fixed machine constant that lives in that taught
+reference: `transform.default_calibration()` is the fallback, but the dialed-in
+`exposure_calibration.json` config carries the definitive reference (a one-time site teach,
+NOT a per-wafer teach). The fine calibration lives in the taught reference; the DXF
+`global_offset` (§5.5) is held at `(0, 0)` and the stage `global_offset_um` stays `(0, 0)` too,
+so the correction is never double-applied. `teach_reference` / `solve_transform` are the
+OPTIONAL one-time helpers used to establish that reference; the per-wafer run path never
+re-teaches.
 
 The transform consumes each array's **`exposed_center_um`** (design frame already rotated by
 `design_rotation_deg`, §2.1). `exposure_calibration.json` (lives on the laser PC, gitignored):
 ```json
 {
   "units": "microns",
-  "reference": { "wafer_um": [0.0, 0.0], "stage_um": { "x": 5590, "y": -18450, "z": 0 } },
+  "reference": { "wafer_um": [0.0, 0.0], "stage_um": { "x": 84355, "y": -19056, "z": 0 } },
   "axes": { "sx": 1, "sy": 1 },
   "mirror": { "x": true, "y": false },
   "global_offset_um": [0.0, 0.0],
   "per_array_offset_um": { "r00c00": [0.0, 0.0] },
   "travel_um": [126000, 76000],
-  "stage_y_max_um": 6950
+  "stage_y_max_um": 0,
+  "reachable_um": { "x_min": 16236, "x_max": 138529, "y_min": -38140, "y_max": 0 }
 }
 ```
 Transform (exposed-frame center of an array → absolute stage target that puts it at field center):
@@ -435,18 +458,21 @@ def wafer_to_stage(exposed_um, cal) -> (x,y):
     sy = cal.reference.stage.y + cal.axes.sy * (wy - ry) + cal.global_offset.y (+nudge)
     return sx, sy
 ```
-Defaults above reproduce Singulation's solved mapping (`stage_X = 5590 − wafer_X`,
-`stage_Y = −18450 + wafer_Y`) as a starting point ONLY. Note the X inversion comes from
-`mirror.x = true` (the backside flip), so `axes.sx = +1`; do not also set `axes.sx = −1` or
-the two cancel.
+The example above carries the ported **definitive** mapping (`stage_X = 84433 − wafer_X`,
+`stage_Y = −18830 + wafer_Y`, reference `(84355, −19056)`); Singulation's older
+`stage_X = 5590 − wafer_X`, `stage_Y = −18450 + wafer_Y` fit is a superseded fallback. Note the
+X inversion comes from `mirror.x = true` (the backside flip), so `axes.sx = +1`; do not also
+set `axes.sx = −1` or the two cancel.
 - `axes.sx/sy` and `mirror` are **empirically determined on this rig** — Singulation warns
   the signs inverted from the first geometric guess. Verify with a test exposure.
 - `solve_transform(pairs)`: given ≥2 taught `(exposed_um, stage_um)` points, least-squares
   solve sign+scale (and small rotation) so first-time setup can teach two known arrays and
   auto-derive `axes`.
 - `teach_reference(optiscan)`: jog + record `reference.stage_um` (reuse `optiscan.cmd_jog`).
-- `check_reachable(plan, cal) -> (ok, failures)`: for every array compute the stage target
-  and assert `|x| ≤ travel_x` and `y_floor ≤ y ≤ stage_y_max_um` (**the P3/P4 ceiling**).
+- `check_reachable(plan, cal) -> (ok, failures)`: for every array compute the stage target and
+  assert it lies inside the calibration's **reachable window** (`reachable_um`, e.g.
+  X ∈ [16236, 138529], Y ∈ [−38140, 0] with the −38140 pipe floor); when no explicit window is
+  set it falls back to the legacy `|x| ≤ travel_x` / `−travel_y ≤ y ≤ stage_y_max_um` model.
   Returns the offending `array_id`s. Called by the laser-PC pre-flight (§7.3) and surfaced in
   the prep app so infeasible sets are caught before the wafer is on the machine.
 
@@ -456,7 +482,8 @@ the two cancel.
 
 ### 7.1 `optiscan.py` — **copy ~verbatim** from `laser-pc/optiscan.py`
 `OptiScan(port='COM5')`: `goto(x,y)`, `goto_z(z)`, `move_rel`, `wait_idle` (two consecutive
-idle `$`), `stage_position`, `_check_target` (soft limits), `_verify_at` (±3 µm). Keep the
+idle `$`), `stage_position`, `_check_target` (soft limits), `_verify_at` (±1 µm,
+`POSITION_TOLERANCE_UM`). Keep the
 `COMP,0`/`ERROR,0` connect handshake and serial drain. Keep `cmd_jog` (teach) but write to
 `exposure_calibration.json`'s `reference`/pairs instead of P1..P4.
 
@@ -549,10 +576,12 @@ shim / FluentWinUI3 dark style. Changes for PFLM:
   don't mutate shapes mid-iteration.
 - **DXF must go through ezdxf** for R2010/$INSUNITS; KLayout's DXF writer can't set them.
 - **STOP is a controlled stop** (between arrays/mask-pauses), never an e-stop. Say so in the UI.
-- **Stage-Y ceiling** (`STAGE_Y_MAX_UM`, default +6950 µm = Singulation's P3/P4 Y): stage Y
-  must never exceed it. The unrotated PFLM design needs +18412 µm at the top row → the +90°
-  design rotation exists specifically to bring every stage-Y target under this ceiling. The
-  laser-PC pre-flight refuses to move if any target is over the ceiling or outside travel.
+- **Reachable window** (post 2026-08 re-datum, asymmetric): the binding stage limit is
+  `reachable_um` X ∈ [16236, 138529] µm, Y ∈ [−38140, 0] µm — the −38140 floor is a PIPE at the
+  back (not the deeper hard stop) and the Y top is 0 (the old +6950 µm P3/P4 ceiling,
+  `STAGE_Y_MAX_UM`, is retired as the laser-PC limit). The unrotated PFLM design needs a large
+  positive stage-Y at the top row → design rotation exists specifically to keep every target
+  inside this window. The laser-PC pre-flight refuses to move if any target is outside it.
 - **Monotonic sweep**: exposure must proceed monotonically along the physical sweep axis
   (top design row first). Never interleave arrays across non-adjacent stripes — a completed,
   masked stripe must stay "behind" the sweep so later ejecta can't reach unmasked work.

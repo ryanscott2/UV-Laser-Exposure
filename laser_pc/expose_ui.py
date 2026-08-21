@@ -59,13 +59,11 @@ PYCON = str(Path(sys.executable).with_name("python.exe"))  # console python for 
 OPTISCAN = HERE / "optiscan.py"
 BUILD = HERE / "winlase_build_jobs.py"
 EXPOSE = HERE / "expose_wafer.py"
-PASSES_CSV = HERE / "expose_passes.csv"
 STOP_FLAG = HERE / ".expose_stop"        # UI writes this on STOP; expose_wafer polls it
 RESUME_FLAG = HERE / ".expose_resume"    # UI writes this on Resume; the mask pause waits on it
 ROOT_MEMO = HERE / ".expose_ui_root"     # remembers the last sets root
 ETCH_PARAMS = HERE / "etch_params.json"  # editable per-type etch table (passes + angles)
 DEFAULT_ROOT = HERE.parent / "output" / "sets"
-DEFAULT_PASSES = 1
 DEFAULT_PORT = "COM5"
 
 # stdout parsing (see the module docstring's contract).
@@ -115,25 +113,6 @@ def plan_summary(data):
     text = "%s  |  %d steps (%d expose, %d mask)  |  %s" % (
         rot_txt, n_steps, n_expose, n_mask, feas_txt)
     return text, n_steps, feasible
-
-
-def passes_for(set_name):
-    """Passes for a set from expose_passes.csv (exact, else 'default', else DEFAULT_PASSES)."""
-    table = {}
-    try:
-        with PASSES_CSV.open(newline="", encoding="utf-8") as stream:
-            for row in csv.reader(stream):
-                if len(row) < 2 or not row[0].strip() or row[0].lstrip().startswith("#"):
-                    continue
-                if row[0].strip().lower() in ("set", "name"):
-                    continue
-                try:
-                    table[row[0].strip()] = int(row[1])
-                except ValueError:
-                    pass
-    except OSError:
-        pass
-    return table.get(set_name, table.get("default", DEFAULT_PASSES))
 
 
 class App:

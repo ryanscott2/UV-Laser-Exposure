@@ -47,7 +47,6 @@ from .centering import (
     clip_and_center,
     dead_space_rects_um,
     fits_field,
-    region_bbox_um,
 )
 from .dxf_writer import write_circles_r2010, write_dxf_r2010, write_rects_r2010
 
@@ -64,6 +63,10 @@ QUALIFIED_FIELD_UM = 54_000
 FULL_FIELD_UM = 78_485
 WAFER_DIAMETER_MM = 100.0
 WAFER_RADIUS_UM = 50_000
+# NOMINAL prep-side envelope for the feasibility PRE-CHECK only (old symmetric frame). The
+# AUTHORITATIVE reachability is the laser-PC calibration's asymmetric reachable_um
+# (X[16236,138529] Y[-38140,0]; a pipe caps -Y at -38140), which the laser PC re-checks at run
+# time (laser_pc/optiscan.py + transform.is_reachable). TODO: make this pre-check asymmetric too.
 TRAVEL_UM = (126_000, 76_000)
 STAGE_Y_MAX_UM = 6_950
 # Baked DXF placement offset (field-frame, applied AFTER rotation/centering). RESET TO 0

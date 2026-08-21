@@ -233,6 +233,7 @@ class OptiScan:
                 "No reply from %s. Check the COM number (Device Manager > Ports), that "
                 "the WinLase/Prior software isn't holding the port, and the cable." % port)
         self.identity = who
+        self.apply_motion_profile()   # gentle SMS/SAS on connect (best-effort), like singulation
 
     def command(self, cmd: str, multiline: bool = False, expect: str = None) -> str:
         """Send one command and return the reply.

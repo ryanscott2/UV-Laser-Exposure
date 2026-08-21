@@ -24,8 +24,9 @@ from .layers import layer_indices_for_spec, parse_layer_spec
 
 # Singulation's solved taught mapping (§2.1 / §6), same wafer/stage/jig family.
 # Used ONLY as a machine-independent default to project design coordinates onto a
-# nominal stage-Y so ``choose_rotation`` can test the P3/P4 ceiling. Treated as an
-# unverified starting point; the laser PC re-checks with the real taught reference.
+# nominal stage-Y so ``choose_rotation`` can test the nominal stage-Y limit. Treated as an
+# unverified starting point; the laser PC re-checks with the real taught reference and its
+# asymmetric reachable_um (pipe floor -38140), which is authoritative.
 DEFAULT_STAGE_REF_UM = (5590.0, -18450.0)  # stage target for wafer (0, 0)
 DEFAULT_AXES = (-1, 1)                      # (sx, sy): stage_X = 5590 - wx, stage_Y = -18450 + wy
 
@@ -186,46 +187,6 @@ def _cluster_box(cluster: list) -> ArrayBox:
         polygon_count=len(cluster),
         has_geometry=len(cluster) > 0,
     )
-
-
-def group_rows(boxes, row_tol_um: float = None) -> list[Row]:
-    """Bucket ArrayBoxes into y-bands, order rows top->bottom, arrays left->right.
-
-    Default tolerance = 25% of the median box height. ``row_index`` 0 is the
-    highest design-y row (first physical stripe after rotation).
-    """
-    if not boxes:
-        return []
-    heights = [b.height_um for b in boxes]
-    med_h = statistics.median(heights)
-    if row_tol_um is None:
-        row_tol_um = 0.25 * med_h
-
-    ordered = sorted(boxes, key=lambda b: -b.center_um[1])
-    bands: list[list[ArrayBox]] = []
-    band_y: list[float] = []
-    for box in ordered:
-        cy = box.center_um[1]
-        placed = False
-        for i, y in enumerate(band_y):
-            if abs(cy - y) <= row_tol_um:
-                bands[i].append(box)
-                # running mean keeps the band center stable
-                band_y[i] = sum(b.center_um[1] for b in bands[i]) / len(bands[i])
-                placed = True
-                break
-        if not placed:
-            bands.append([box])
-            band_y.append(cy)
-
-    # Sort bands top->bottom by their mean y.
-    order = sorted(range(len(bands)), key=lambda i: -band_y[i])
-    rows: list[Row] = []
-    for row_index, bi in enumerate(order):
-        arrays = tuple(sorted(bands[bi], key=lambda b: b.center_um[0]))
-        y_center = sum(b.center_um[1] for b in arrays) / len(arrays)
-        rows.append(Row(row_index=row_index, y_center_um=y_center, arrays=arrays))
-    return rows
 
 
 ALIGN_TOL_UM = 25_000.0   # an alignment mark must land within +/- this of field center

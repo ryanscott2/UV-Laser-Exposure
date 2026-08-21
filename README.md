@@ -39,8 +39,10 @@ python prep_app/prep_app.py
 - **Prep half** — verifiable offline against a real GDS; this is the primary deliverable.
 - **Laser-PC half** — adapted from Singulation's vetted `optiscan.py` / `winlase_build_jobs.py` /
   `dice_wafer.py`. The serial + WinLase-COM paths **cannot be tested off the machine** and
-  require on-hardware bring-up (calibration, axis signs, the backside mirror). Treat all
-  calibration numbers as un-verified until re-measured on this rig.
+  require on-hardware bring-up. The stage calibration is now **ported from the dialed-in
+  Singulation setup and confirmed definitive** — refine it with a tiny DXF `global_offset`, not
+  by re-teaching. The genuine remaining caveat: the **WinLase-COM and serial paths are still
+  un-verified off the machine.**
 
 > ⚠️ Laser safety: exposure runs default to SIMULATE. Arming requires `--arm` plus a typed
 > confirmation and a countdown. The UI STOP is a *controlled* stop between rows/passes — the

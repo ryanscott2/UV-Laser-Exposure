@@ -43,7 +43,7 @@ from PySide6.QtCore import (Property, QAbstractListModel, QByteArray, QModelInde
                             QObject, QPointF, QProcess, QRectF, Qt, QThread, QTimer,
                             QUrl, Signal, Slot)
 from PySide6.QtGui import (QColor, QFont, QGuiApplication, QPainter,  # noqa: E402
-                           QPainterPath, QPen, QPolygonF)
+                           QPen, QPolygonF)
 from PySide6.QtQml import QmlElement, QQmlApplicationEngine  # noqa: E402
 from PySide6.QtQuick import QQuickPaintedItem  # noqa: E402
 from PySide6.QtQuickControls2 import QQuickStyle  # noqa: E402
@@ -63,9 +63,8 @@ try:
     from pflm import layers as pflm_layers  # noqa: E402
     from pflm import arrays as pflm_arrays  # noqa: E402
     from pflm import plan as pflm_plan  # noqa: E402
-    from pflm import centering as pflm_centering  # noqa: E402
 except Exception as exc:  # noqa: BLE001 - surfaced in the UI status line
-    pflm_layers = pflm_arrays = pflm_plan = pflm_centering = None
+    pflm_layers = pflm_arrays = pflm_plan = None
     PFLM_IMPORT_ERROR = str(exc)
 
 QML_IMPORT_NAME = "PflmPrep"
@@ -79,7 +78,6 @@ DATASETS_JSON = HERE / ".ui_datasets.json"
 WAFER_RADIUS_MM = 50.0
 USABLE_HALF_UM = 30000        # +/-30 mm usable field
 QUALIFIED_UM = 54000
-FULL_UM = 78485
 TRAVEL_UM = (126000, 76000)   # X, Y stage travel
 STAGE_Y_MAX_UM = 6950         # the P3/P4 ceiling
 

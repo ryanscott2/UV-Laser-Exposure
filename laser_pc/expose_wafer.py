@@ -29,8 +29,8 @@ dice_wafer.py, which the safety code is adapted from):
     (unless --yes, e.g. the UI confirms instead).
   * PRE-FLIGHT (before any motion or arming): every array's stage target is computed via
     transform.wafer_to_stage and checked with transform.check_reachable -- refuse to run
-    if ANY target is outside travel or over the +STAGE_Y_MAX_UM stage-Y ceiling (the
-    P3/P4 ceiling, sec 2.1), or if plan.stage.feasible is false. The offending array_ids
+    if ANY target is outside the calibration's reachable window (the asymmetric,
+    pipe-limited envelope, sec 2.1), or if plan.stage.feasible is false. The offending array_ids
     are printed. Then, when armed, every job's laser profile is read back and verified
     (power 100 %, freq 30 kHz, mark speed within 100-1000 mm/s); any mismatch aborts -- no motion, no
     firing. Each job is re-checked once more at mark time. This script never WRITES laser
@@ -72,8 +72,6 @@ DEFAULT_PASSES = 1                   # fallback pass count per array; set on the
 DEFAULT_PASSES_FILE = Path(__file__).resolve().parent / "expose_passes.csv"
 DEFAULT_CALIBRATION = Path(__file__).resolve().parent / "exposure_calibration.json"
 DEFAULT_COUNTDOWN_S = 10
-STAGE_Y_MAX_UM_FALLBACK = 6950       # the P3/P4 stage-Y ceiling (sec 2.1); plan/cal override this
-DEFAULT_TRAVEL_UM = (126000, 76000)  # ES111 travel envelope (sec 2)
 
 # Required laser profile -- power and frequency MUST match the WinLase "Vector Graphic
 # -> Properties -> Profile" the operator confirmed (power 100 %, frequency 30 kHz).
@@ -616,18 +614,6 @@ def passes_for(step, arrays, override, fallback):
     return int(p) if p is not None else int(fallback)
 
 
-def stage_bounds(plan: dict, cal_raw: dict):
-    """(travel_x, travel_y, stage_y_max) from plan.stage, falling back to cal then const."""
-    stage = plan.get("stage", {}) or {}
-    travel = stage.get("travel_um") or cal_raw.get("travel_um") or list(DEFAULT_TRAVEL_UM)
-    travel_x = int(travel[0])
-    travel_y = int(travel[1])
-    ceil = stage.get("stage_y_max_um")
-    if ceil is None:
-        ceil = cal_raw.get("stage_y_max_um", STAGE_Y_MAX_UM_FALLBACK)
-    return travel_x, travel_y, int(ceil)
-
-
 def job_path(set_dir: Path, set_name: str, array_id: str) -> Path:
     """<set_dir>/WinLaseJobs/<set>_<array_id>.wlj (sec 4). Uses a naming helper from
     winlase_build_jobs if it provides one, so the two halves can't drift on the filename."""
@@ -655,7 +641,7 @@ def expose_targets(plan: dict, arrays: dict, cal):
     return out
 
 
-def preflight(plan: dict, cal, travel_x: int, travel_y: int, ceil: int):
+def preflight(plan: dict, cal):
     """Authoritative reachability verdict (sec 2.1 / 7.3). Combines plan.stage.feasible
     with transform.check_reachable. Returns (ok, feasible, failures)."""
     feasible = bool(plan.get("stage", {}).get("feasible", True))
@@ -668,15 +654,7 @@ def preflight(plan: dict, cal, travel_x: int, travel_y: int, ceil: int):
     return (feasible and bool(ok_reach)), feasible, failures
 
 
-def _local_reach(x: int, y: int, travel_x: int, travel_y: int, ceil: int) -> bool:
-    """Per-target display check mirroring check_reachable: inside travel AND under the
-    stage-Y ceiling. The authoritative gate is transform.check_reachable; this is for the
-    printed --list table only."""
-    return abs(x) <= travel_x and -travel_y <= y <= ceil
-
-
-def print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, focus, armed,
-                   travel_x, travel_y, ceil, cal):
+def print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, focus, armed, cal):
     tmap = {id(step): xy for step, _aid, xy in targets}
     rot = plan.get("design_rotation_deg", "?")
     strat = plan.get("mask_strategy", {}) or {}
@@ -826,7 +804,6 @@ def main() -> int:
     else:
         print("stage map: built-in mechanical default (no teaching; calibration OFFSET is in "
               "the DXF). Verify the fixed wafer->stage constants match this jig.")
-    travel_x, travel_y, ceil = stage_bounds(plan, cal_raw)
     targets = expose_targets(plan, arrays, cal)
 
     fb_csv, passes_src = load_passes(args.passes_file, set_name, DEFAULT_PASSES)
@@ -869,17 +846,16 @@ def main() -> int:
             "style": (tp or {}).get("fill_style") or pe.get("fill_style") or "crosshatch",
         }
 
-    print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, args.focus, args.arm,
-                   travel_x, travel_y, ceil, cal)
+    print_schedule(plan, set_dir, set_name, arrays, targets, passes_by_label, args.focus, args.arm, cal)
 
-    ok, feasible, failures = preflight(plan, cal, travel_x, travel_y, ceil)
+    ok, feasible, failures = preflight(plan, cal)
     _bx0, _bx1, _by0, _by1 = cal.reach_bounds()
     print("\npre-flight: plan.stage.feasible=%s | reachable=%s (X[%.0f,%.0f] Y[%.0f,%.0f] um)"
           % (str(feasible).lower(), "yes" if ok else "NO", _bx0, _bx1, _by0, _by1))
     if not feasible:
-        print("  plan.stage marks this set INFEASIBLE (rotated spans do not fit travel/ceiling).")
+        print("  plan.stage marks this set INFEASIBLE (rotated spans do not fit the reachable window).")
     if failures:
-        print("  targets over the ceiling / outside travel: %s" % ", ".join(str(f) for f in failures))
+        print("  targets outside the reachable window: %s" % ", ".join(str(f) for f in failures))
     _uniq = sorted(set(passes_by_label.values()))
     print("passes per array: %s  [%s]"
           % (str(_uniq[0]) if len(_uniq) == 1 else "%d..%d (varies by type)" % (_uniq[0], _uniq[-1]),

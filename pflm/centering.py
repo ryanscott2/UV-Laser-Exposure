@@ -171,14 +171,6 @@ def dead_space_rects_um(cell_box_um, field_box_um, *, design_rotation_deg=0,
     return out
 
 
-def region_bbox_um(layout, region):
-    """(l, b, r, t) of a region in microns, or None if empty."""
-    if region.is_empty():
-        return None
-    box = region.bbox()
-    return tuple(_dbu_to_um(layout, v) for v in (box.left, box.bottom, box.right, box.top))
-
-
 def fits_field(region, usable_half_um=USABLE_FIELD_HALF_UM, *, dbu=None) -> bool:
     """True if a (centered) region stays within +/- ``usable_half_um`` of origin.
 

@@ -157,13 +157,6 @@ def build_layout(src_path, out_path):
     return out, top, frame_counts, placed
 
 
-def square_centers_rows(dy, diam, half=FILL_HALF_UM):
-    limit = half - diam / 2.0
-    n = int((2 * limit) // dy)
-    start = -n * dy / 2.0
-    return [start + i * dy for i in range(n + 1)]
-
-
 def write_manifest(placed, manifest_path, etch_params_path=ETCH_PARAMS):
     """Tie each chip to its type + etch params, in both design and exposed (rotated) frames."""
     etch = json.load(open(etch_params_path))["types"]
