@@ -28,6 +28,7 @@ except ImportError:
 from . import schema_version
 from .arrays import (
     ALIGN_TOL_UM,
+    REACHABLE_UM,
     choose_rotation,
     clamp_center,
     count_pinfins_in,
@@ -63,12 +64,11 @@ QUALIFIED_FIELD_UM = 54_000
 FULL_FIELD_UM = 78_485
 WAFER_DIAMETER_MM = 100.0
 WAFER_RADIUS_UM = 50_000
-# NOMINAL prep-side envelope for the feasibility PRE-CHECK only (old symmetric frame). The
-# AUTHORITATIVE reachability is the laser-PC calibration's asymmetric reachable_um
-# (X[16236,138529] Y[-38140,0]; a pipe caps -Y at -38140), which the laser PC re-checks at run
-# time (laser_pc/optiscan.py + transform.is_reachable). TODO: make this pre-check asymmetric too.
-TRAVEL_UM = (126_000, 76_000)
-STAGE_Y_MAX_UM = 6_950
+# Feasibility uses the ASYMMETRIC usable stage window arrays.REACHABLE_UM (X[16236,138529]
+# Y[-38140,0]; a pipe caps -Y at -38140), matching the laser-PC calibration. The prep projects
+# each array center to an absolute stage target and requires it inside this box -- the same check
+# transform.is_reachable runs. Still a NOMINAL pre-check; the laser PC re-checks with the real
+# taught reference at run time (laser_pc/optiscan.py + transform).
 # Baked DXF placement offset (field-frame, applied AFTER rotation/centering). RESET TO 0
 # 2026-08-20: the coarse/hardware placement now lives in the TAUGHT reference + stations (the
 # dialed-in nest, mirroring singulation), so the old back-side -3447/+460 value is retired.
@@ -141,7 +141,7 @@ def _clear_existing_dxf(jobs_dir: Path) -> None:
 
 def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
               backside=True, rotation_deg="auto", within_row_stride=2,
-              travel_um=TRAVEL_UM, stage_y_max_um=STAGE_Y_MAX_UM,
+              reachable_um=REACHABLE_UM,
               global_offset_um=GLOBAL_OFFSET_UM, row_tol_um=None,
               params_csv=None, pin_mode="polygon", expose_align=True,
               align_tol_um=ALIGN_TOL_UM, ablate_dead_space=False, cell="4/0",
@@ -198,14 +198,12 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
 
     # ---- rotation choice (extent-based, to fit the stage) (§2.1) -------------
     if isinstance(rotation_deg, str) and rotation_deg.strip().lower() == "auto":
-        chosen = choose_rotation(boxes, travel_um=tuple(travel_um),
-                                 stage_y_max_um=stage_y_max_um)
+        chosen = choose_rotation(boxes, reachable_um=reachable_um)
         deg = int(chosen["deg"])
         note(f"design_rotation_deg = auto -> {deg} (feasible={chosen['feasible']})")
     else:
         deg = int(rotation_deg) % 360
-        chosen = rotation_feasibility(boxes, deg, travel_um=tuple(travel_um),
-                                      stage_y_max_um=stage_y_max_um)
+        chosen = rotation_feasibility(boxes, deg, reachable_um=reachable_um)
         note(f"design_rotation_deg = {deg} (explicit; feasible={chosen['feasible']})")
 
     # ---- group into PHYSICAL rows in the EXPOSED frame (never mix rows, §2.2)-
@@ -213,20 +211,26 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
     note(f"Grouped {len(boxes)} arrays into {len(rows)} physical row(s) "
          f"(exposed-Y bands, top->bottom); sizes = {[len(r.arrays) for r in rows]}")
 
+    x_min, x_max, y_min, y_max = reachable_um
     stage = {
-        "travel_um": [int(travel_um[0]), int(travel_um[1])],
-        "stage_y_max_um": int(stage_y_max_um),
+        "reachable_um": {"x_min": int(x_min), "x_max": int(x_max),
+                         "y_min": int(y_min), "y_max": int(y_max)},
         "sweep_axis": chosen["sweep_axis"],            # within a row (stage-X)
         "row_advance_axis": chosen["row_advance_axis"],  # between rows (stage-Y)
         "sweep_span_um": round(chosen["sweep_span_um"], 3),
         "row_advance_span_um": round(chosen["row_advance_span_um"], 3),
         "max_stage_y_um": round(chosen["max_stage_y_um"], 3),
+        "min_stage_y_um": round(chosen["min_stage_y_um"], 3),
+        "max_stage_x_um": round(chosen["max_stage_x_um"], 3),
+        "min_stage_x_um": round(chosen["min_stage_x_um"], 3),
         "feasible": bool(chosen["feasible"]),
-        "notes": ("within-row sweep rides stage-X; rows advance along stage-Y "
-                  f"(kept at/below the +{stage_y_max_um} um ceiling)"),
+        "notes": ("within-row sweep rides stage-X; rows advance along stage-Y; every array "
+                  f"center must land in the usable window X[{int(x_min)},{int(x_max)}] "
+                  f"Y[{int(y_min)},{int(y_max)}] um (pipe floor {int(y_min)})"),
     }
     if not stage["feasible"]:
-        warn("stage.feasible=false — rotated spans do not fit travel/ceiling; "
+        warn("stage.feasible=false — some array centers fall outside the usable stage window "
+             f"(X[{int(x_min)},{int(x_max)}] Y[{int(y_min)},{int(y_max)}] um, pipe floor {int(y_min)}); "
              "the laser-PC pre-flight will refuse to run this set")
 
     # ---- per-array centering + DXF -------------------------------------------
@@ -400,8 +404,7 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
             for mi, mb in enumerate(marks):
                 aid = "align%02d" % mi
                 exposed_mark = rotate_point_um(mb.center_um, deg)
-                eff, off = clamp_center(exposed_mark, travel_um=tuple(travel_um),
-                                        stage_y_max_um=stage_y_max_um)
+                eff, off = clamp_center(exposed_mark, reachable_um=reachable_um)
                 region = clip_and_center(layout, align, mb.bbox_um, design_rotation_deg=deg,
                                          global_offset_um=tuple(global_offset_um),
                                          center_override=eff)
