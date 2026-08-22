@@ -20,6 +20,9 @@ tmp/
 # Generated design manifests (reproducible from the design scripts, like the GDS)
 design/*_params.csv
 
+# Local one-off souvenir generator (personal scratch design tool -- kept out of the repo)
+design/make_souvenir.py
+
 # --- Laser-PC runtime state (never commit) ---
 laser_pc/.expose_stop
 laser_pc/.expose_ui_root
