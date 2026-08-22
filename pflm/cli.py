@@ -68,6 +68,7 @@ def _cmd_build(args) -> int:
         ablate_dead_space=args.ablate_dead_space,
         cell=args.cell,
         dead_space_wash=not args.no_dead_space_wash,
+        mask=not args.no_mask,
     )
     print(f"Set folder: {set_dir}")
     return 0
@@ -100,6 +101,10 @@ def build_parser() -> argparse.ArgumentParser:
                               "the physical nest; exposed-frame designs need none (the default).")
     p_build.add_argument("--stride", type=int, default=2,
                          help="within-row masking stride (§2.2)")
+    p_build.add_argument("--no-mask", action="store_true",
+                         help="collapse the schedule to a straight-through mark: no inter-array "
+                              "mask/wash pauses and no pre-align mask (for decorative/souvenir runs "
+                              "where debris redeposition isn't a concern)")
     p_build.add_argument("--global-x", type=float, default=0.0,
                          help="baked-in DXF X correction, microns (0 = none; bulk placement is in the "
                               "taught reference -- this is the knob for future small corrections)")

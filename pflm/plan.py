@@ -84,7 +84,7 @@ def array_id(row_index: int, col_index: int) -> str:
     return f"r{row_index:02d}c{col_index:02d}"
 
 
-def build_schedule(rows, within_row_stride=2) -> list:
+def build_schedule(rows, within_row_stride=2, mask_between_groups=True) -> list:
     """The §2.2 group + mask algorithm.
 
     Within each row, group arrays by ``col_index % within_row_stride`` (phase 0 =
@@ -92,6 +92,10 @@ def build_schedule(rows, within_row_stride=2) -> list:
     col order, inserting one ``mask`` pause **before any subsequent expose** — so
     #masks = (#non-empty groups) - 1, with no trailing mask.
     ``within_row_stride=1`` degrades to expose-whole-row-then-mask.
+
+    ``mask_between_groups=False`` emits every expose back-to-back with NO mask pauses
+    (a straight-through mark) — for decorative/souvenir runs where inter-array debris
+    redeposition isn't a concern. Pair with ``within_row_stride=1`` for natural order.
     """
     stride = max(int(within_row_stride), 1)
     schedule: list = []
@@ -103,7 +107,7 @@ def build_schedule(rows, within_row_stride=2) -> list:
             cols = [c for c in range(ncols) if c % stride == phase]
             if not cols:
                 continue
-            if prev is not None:
+            if prev is not None and mask_between_groups:
                 schedule.append({
                     "step": step,
                     "action": "mask",
@@ -146,7 +150,7 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
               global_offset_um=GLOBAL_OFFSET_UM, row_tol_um=None,
               params_csv=None, pin_mode="polygon", expose_align=True,
               align_tol_um=ALIGN_TOL_UM, ablate_dead_space=False, cell="4/0",
-              dead_space_etch=None, dead_space_wash=True,
+              dead_space_etch=None, dead_space_wash=True, mask=True,
               overwrite_in_place=True) -> dict:
     """Full prep pipeline; returns the plan dict and writes the set folder.
 
@@ -334,7 +338,10 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
              "exposed by any job (dropped geometry)")
 
     # ---- schedule (§2.2) ------------------------------------------------------
-    schedule = build_schedule(rows, within_row_stride=within_row_stride)
+    # mask=False collapses to a straight-through mark: no inter-group masks, natural
+    # (stride-1) order. The align pre-mask below is also suppressed.
+    eff_stride = within_row_stride if mask else 1
+    schedule = build_schedule(rows, within_row_stride=eff_stride, mask_between_groups=mask)
     n_expose = sum(1 for s in schedule if s["action"] == "expose")
     n_mask = sum(1 for s in schedule if s["action"] == "mask")
     note(f"Schedule: {n_expose} expose step(s), {n_mask} mask pause(s)")
@@ -416,7 +423,7 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
                  f"crosshatch {ALIGN_ETCH['fill_angles_deg']} deg, +/-{align_tol_um/1000:.0f} mm tol")
             step = len(schedule)
             align_row = {"row_index": len(rows_out), "exposed_y_center_um": 0.0, "arrays": []}
-            if any(s["action"] == "expose" for s in schedule):
+            if mask and any(s["action"] == "expose" for s in schedule):
                 schedule.append({"step": step, "action": "mask",
                                  "label": "pinfins complete -- wash + mask, then etch alignment marks"})
                 step += 1
@@ -474,8 +481,8 @@ def build_set(gds_path, set_dir, *, pinfin="3/0", bbox="4/0", align="5/0",
         "backside": bool(backside),
         "design_rotation_deg": deg,
         "exposure_order": "top_to_bottom",
-        "mask_strategy": {"within_row_stride": int(within_row_stride),
-                          "mask_between_groups": True},
+        "mask_strategy": {"within_row_stride": int(eff_stride),
+                          "mask_between_groups": bool(mask)},
         "etch": ({"source": Path(params_csv).name, "fill_style": "crosshatch",
                   "hatch_mm": 0.01, "note": "per-array passes + fill_angles under rows[].arrays[].etch"}
                  if etch else None),
